@@ -19,9 +19,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           # The script targets 3.6+, but the runners no longer ship anything
           # below 3.9. This still catches syntax and stdlib usage newer than
