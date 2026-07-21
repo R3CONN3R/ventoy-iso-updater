@@ -498,20 +498,40 @@ def r_fedora_ws():
         iso_base, r'href="(Fedora-Workstation-Live-[^"]+\.iso)"')
 
 
-def r_opensuse_leap():
-    # MirrorCache autoindex uses "./<ver>/" links. Leap renumbered 42.x -> 15.x,
-    # so the legacy 42 line must be ignored when picking the newest release.
-    base = "https://download.opensuse.org/distribution/leap/"
-    dirs = re.findall(r'href="\./([\d.]+)/"', http_get(base))
-    cand = sorted((d for d in dirs if int(d.split(".")[0]) < 40),
+LEAP_BASE = "https://download.opensuse.org/distribution/leap/"
+
+# Leap 16 replaced the single DVD image with a much smaller offline installer
+# and moved it to a different subdirectory, under a different filename scheme.
+# Both layouts are still served, newest first. Note the trailing ".install.iso"
+# on the 16.x name -- the plain form, not the "-Build<n>" snapshots that sit in
+# the same directory.
+LEAP_LAYOUTS = (
+    ("offline/",
+     r'href="\.?/?(Leap-[\d.]+-offline-installer-x86_64\.install\.iso)"'),
+    ("iso/",
+     r'href="\.?/?(openSUSE-Leap-[\d.]+-DVD-x86_64-Media\.iso)"'),
+)
+
+
+def leap_versions():
+    """Leap release directories, newest first, legacy 42.x line excluded.
+
+    Leap renumbered 42.x -> 15.x, so 42 is the *older* line despite the higher
+    number and must not win the sort.
+    """
+    dirs = re.findall(r'href="\./([\d.]+)/"', http_get(LEAP_BASE))
+    return sorted((d for d in set(dirs) if int(d.split(".")[0]) < 40),
                   key=verkey, reverse=True)
-    rgx = r'href="\.?/?(openSUSE-Leap-[\d.]+-DVD-x86_64-Media\.iso)"'
-    for d in cand:
-        try:
-            return latest_in_listing("%s%s/iso/" % (base, d), rgx)
-        except Exception:
-            continue
-    raise RuntimeError("no openSUSE Leap DVD ISO found")
+
+
+def r_opensuse_leap():
+    for d in leap_versions():
+        for sub, rgx in LEAP_LAYOUTS:
+            try:
+                return latest_in_listing("%s%s/%s" % (LEAP_BASE, d, sub), rgx)
+            except Exception:
+                continue
+    raise RuntimeError("no openSUSE Leap installer ISO found")
 
 
 def r_opensuse_tumbleweed():
