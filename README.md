@@ -72,3 +72,23 @@ administrator rights, ~40 minutes and ~15 GB of scratch space).
 ## Requirements
 
 Python 3.6+. Nothing else -- standard library only.
+
+## Development
+
+The catalog resolves download URLs from ~50 foreign directory listings, so the
+usual way this breaks is an upstream reorganizing its mirror. `check_resolvers`
+asks every upstream whether its resolver still finds an ISO:
+
+```sh
+python tests/check_resolvers.py
+```
+
+It also pins one invariant that already bit once: openSUSE Leap must resolve to
+the newest release on the mirror. Leap 16 moved its installer to a new path and
+filename, the resolver stopped matching, and instead of failing it quietly kept
+serving end-of-life 15.6 -- so "the resolver returned something" is not enough
+on its own.
+
+Failures are retried once before the check gives up, because a mirror that
+times out under parallel requests is a hiccup, not a broken layout. GitHub
+Actions runs the whole thing every Monday.

@@ -1,0 +1,35 @@
+name: check resolvers
+
+# The script resolves download URLs from ~50 foreign directory listings. When
+# one of those upstreams changes its layout, the matching resolver breaks --
+# and without this job the first sign of it is a failed download in front of
+# the Ventoy stick. Runs weekly, on every push, and on demand.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Mondays 05:00 UTC
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+jobs:
+  resolvers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # The script targets 3.6+, but the runners no longer ship anything
+          # below 3.9. This still catches syntax and stdlib usage newer than
+          # 3.9; the 3.6-3.8 window is untested.
+          python-version: "3.9"
+
+      - name: Compile
+        run: python -m compileall -q update_ventoy_isos.py tests/
+
+      - name: Resolve every catalog entry
+        run: python tests/check_resolvers.py
