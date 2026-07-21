@@ -38,8 +38,9 @@ release replaced -- including ones the manifest never knew about -- lists each
 one next to the file that superseded it, and deletes them once you confirm
 (`--cleanup ask|yes|no`).
 
-**~55 items in the catalog**, grouped by family: desktop distros, the official
-Ubuntu flavours, server/enterprise, security, rescue tools, BSD. Pick a preset
+**~60 items in the catalog**, grouped by family: desktop distros, the official
+Ubuntu flavours, server/enterprise (including the Proxmox products and XCP-ng),
+security, rescue tools, BSD. Pick a preset
 (Standard / Advanced / Everything) or individual numbers and ranges like
 `1,3,5-9`, `+12`, `-4`.
 
@@ -92,3 +93,7 @@ on its own.
 Failures are retried once before the check gives up, because a mirror that
 times out under parallel requests is a hiccup, not a broken layout. GitHub
 Actions runs the whole thing every Monday.
+
+## License
+
+MIT -- see [LICENSE](LICENSE).
