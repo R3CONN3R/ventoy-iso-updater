@@ -22,8 +22,9 @@ has replaced -- including ones the manifest never knew about -- lists each one
 with the file that superseded it and deletes them once you confirm
 (--cleanup {ask,yes,no}).
 
-On start you choose what to download from a catalog of ~55 Linux distros,
-Windows ISOs and rescue tools: a preset (Standard / Advanced / Everything) or
+On start you choose what to download from a catalog of ~60 Linux distros,
+hypervisors, Windows ISOs and rescue tools: a preset (Standard / Advanced /
+Everything) or
 a custom pick (numbers/ranges like 1,3,5-9). Presets:
     Standard    -- one mainstream pick per job: the common desktops, a server
                    netinst, and the rescue tools you actually reach for
@@ -287,17 +288,23 @@ def r_debian():
         r'href="(debian-[\d.]+-amd64-netinst\.iso)"')
 
 
-def r_fedora_kde():
-    # dl.fedoraproject.org is behind an anti-bot challenge; use an open mirror.
+def _fedora_iso(edition, iso_regex):
+    """Newest Fedora ISO of one edition (KDE, Workstation, Server, ...).
+
+    dl.fedoraproject.org is behind an anti-bot challenge, so the release list
+    comes from an open mirror.
+    """
     rel_base = "https://mirrors.kernel.org/fedora/releases/"
-    html = http_get(rel_base)
-    nums = [int(n) for n in re.findall(r'href="(\d+)/"', html)]
+    nums = [int(n) for n in re.findall(r'href="(\d+)/"', http_get(rel_base))]
     if not nums:
         raise RuntimeError("could not list Fedora releases")
-    n = max(nums)
-    iso_base = "%s%d/KDE/x86_64/iso/" % (rel_base, n)
-    return latest_in_listing(
-        iso_base, r'href="(Fedora-KDE-Desktop-Live-\d+-[\d.]+\.x86_64\.iso)"')
+    iso_base = "%s%d/%s/x86_64/iso/" % (rel_base, max(nums), edition)
+    return latest_in_listing(iso_base, iso_regex)
+
+
+def r_fedora_kde():
+    return _fedora_iso(
+        "KDE", r'href="(Fedora-KDE-Desktop-Live-\d+-[\d.]+\.x86_64\.iso)"')
 
 
 def r_ubuntu_server_2404():
@@ -330,10 +337,42 @@ def r_qubes():
         r'href="(Qubes-R[\d.]+-x86_64\.iso)"')
 
 
-def r_proxmox():
+def _proxmox_iso(product):
+    """Newest ISO of one Proxmox product -- they share a single index.
+
+    The product name is matched exactly up to the "_<ver>-<build>" suffix, so
+    "proxmox-mail-gateway" does not also pick up the differently spelled legacy
+    "proxmox-mailgateway_7.3-1.iso" that still sits in the same directory.
+    """
     return latest_in_listing(
         "https://enterprise.proxmox.com/iso/",
-        r'href="\.?/?(proxmox-ve_[\d.]+-\d+\.iso)"')
+        r'href="\.?/?(%s_[\d.]+-\d+\.iso)"' % re.escape(product))
+
+
+def r_proxmox():
+    return _proxmox_iso("proxmox-ve")
+
+
+def r_proxmox_backup():
+    return _proxmox_iso("proxmox-backup-server")
+
+
+def r_proxmox_mailgw():
+    return _proxmox_iso("proxmox-mail-gateway")
+
+
+def r_proxmox_dcm():
+    return _proxmox_iso("proxmox-datacenter-manager")
+
+
+def r_xcpng():
+    # Version dirs sit next to a non-numeric "drivers" dir, which the numeric
+    # dir filter skips. Exclude the netinstall image: the full ISO is the one
+    # that makes sense on a stick. A respin appends ".2" to the build date and
+    # sorts above the original, which is what we want.
+    return _latest_subdir_iso(
+        "https://updates.xcp-ng.org/isos/",
+        r'href="(xcp-ng-[\d.]+-\d+(?:\.\d+)?\.iso)"')
 
 
 def r_nixos_graphical():
@@ -491,11 +530,19 @@ def _flavour(name, edition="desktop"):
 
 
 def r_fedora_ws():
-    rel_base = "https://mirrors.kernel.org/fedora/releases/"
-    n = max(int(x) for x in re.findall(r'href="(\d+)/"', http_get(rel_base)))
-    iso_base = "%s%d/Workstation/x86_64/iso/" % (rel_base, n)
+    return _fedora_iso(
+        "Workstation", r'href="(Fedora-Workstation-Live-[^"]+\.iso)"')
+
+
+def r_fedora_server():
+    return _fedora_iso(
+        "Server", r'href="(Fedora-Server-dvd-x86_64-[^"]+\.iso)"')
+
+
+def r_debian_live_gnome():
     return latest_in_listing(
-        iso_base, r'href="(Fedora-Workstation-Live-[^"]+\.iso)"')
+        "https://cdimage.debian.org/debian-cd/current-live/amd64/iso-hybrid/",
+        r'href="(debian-live-[\d.]+-amd64-gnome\.iso)"')
 
 
 LEAP_BASE = "https://download.opensuse.org/distribution/leap/"
@@ -629,6 +676,12 @@ def r_finnix():
                               r'href="(finnix-[\d.]+\.iso)"')
 
 
+def r_grml():
+    # "full" ships the complete toolset; "small" is the stripped variant.
+    return latest_in_listing("https://download.grml.org/",
+                             r'href="(grml-full-[\d.]+-amd64\.iso)"')
+
+
 def r_kaspersky():
     return ("https://rescuedisk.s.kaspersky-labs.com/updatable/2018/krd.iso",
             "krd.iso")
@@ -680,6 +733,7 @@ CATALOG = [
     ("ubuntu_desk24", "Ubuntu 24.04 Desktop",   "Desktop", "advanced", "iso", r_ubuntu_desktop_2404),
     ("mint",          "Linux Mint Cinnamon",    "Desktop", "standard", "iso", r_mint),
     ("mxlinux",       "MX Linux",               "Desktop", "advanced", "iso", r_mxlinux),
+    ("debian_live",   "Debian Live GNOME",      "Desktop", "advanced", "iso", r_debian_live_gnome),
     ("fedora_kde",    "Fedora KDE Live",        "Desktop", "standard", "iso", r_fedora_kde),
     ("fedora_ws",     "Fedora Workstation",     "Desktop", "advanced", "iso", r_fedora_ws),
     ("opensuse_lp",   "openSUSE Leap",          "Desktop", "advanced", "iso", r_opensuse_leap),
@@ -706,9 +760,14 @@ CATALOG = [
     ("ubuntu_srv26",  "Ubuntu 26.04 Server",    "Server",  "standard", "iso", r_ubuntu_server_2604),
     ("ubuntu_srv24",  "Ubuntu 24.04 Server",    "Server",  "advanced", "iso", r_ubuntu_server_2404),
     ("proxmox",       "Proxmox VE",             "Server",  "standard", "iso", r_proxmox),
+    ("pbs",           "Proxmox Backup Server",  "Server",  "advanced", "iso", r_proxmox_backup),
+    ("pmg",           "Proxmox Mail Gateway",   "Server",  "extra",    "iso", r_proxmox_mailgw),
+    ("pdm",           "Proxmox Datacenter Mgr", "Server",  "extra",    "iso", r_proxmox_dcm),
+    ("xcpng",         "XCP-ng",                 "Server",  "advanced", "iso", r_xcpng),
     ("rocky",         "Rocky Linux",            "Server",  "advanced", "iso", r_rocky),
     ("alma",          "AlmaLinux",              "Server",  "advanced", "iso", r_alma),
     ("centos",        "CentOS Stream",          "Server",  "extra",    "iso", r_centos_stream),
+    ("fedora_srv",    "Fedora Server",          "Server",  "extra",    "iso", r_fedora_server),
     # ---- Security ------------------------------------------------------- #
     ("kali",          "Kali netinst",           "Security","standard", "iso", r_kali),
     ("parrot",        "Parrot Security",        "Security","advanced", "iso", r_parrot),
@@ -719,6 +778,7 @@ CATALOG = [
     ("systemrescue",  "SystemRescue",           "Rescue",  "standard", "iso", r_systemrescue),
     ("hbcd",          "Hiren's BootCD PE",      "Rescue",  "standard", "iso", r_hbcd),
     ("finnix",        "Finnix (sysadmin)",      "Rescue",  "extra",    "iso", r_finnix),
+    ("grml",          "Grml (sysadmin)",        "Rescue",  "advanced", "iso", r_grml),
     ("gparted",       "GParted Live",           "Rescue",  "standard", "iso", r_gparted),
     ("clonezilla",    "Clonezilla Live",        "Rescue",  "standard", "iso", r_clonezilla),
     ("rescuezilla",   "Rescuezilla",            "Rescue",  "advanced", "iso", r_rescuezilla),
@@ -766,6 +826,7 @@ DESCRIPTIONS = {
     "ubuntu_desk24": "previous Ubuntu LTS, supported until 2029",
     "mint":          "beginner-friendly Ubuntu spin, classic Windows-like desktop",
     "mxlinux":       "lightweight Debian spin, runs well on old hardware",
+    "debian_live":   "plain Debian as a live desktop -- try it before installing",
     "fedora_kde":    "modern KDE Plasma desktop, live-bootable",
     "fedora_ws":     "same Fedora with GNOME instead of KDE",
     "opensuse_lp":   "stable openSUSE release, enterprise-grade base",
@@ -792,9 +853,14 @@ DESCRIPTIONS = {
     "ubuntu_srv26":  "newest Ubuntu LTS server, no desktop",
     "ubuntu_srv24":  "previous Ubuntu LTS server, supported until 2029",
     "proxmox":       "bare-metal hypervisor for VMs and LXC containers",
+    "pbs":           "backup server for Proxmox VE -- deduplicated, incremental",
+    "pmg":           "mail gateway: spam and virus filter in front of a mail server",
+    "pdm":           "single pane of glass for several Proxmox VE hosts",
+    "xcpng":         "the other open hypervisor, XenServer-based; Xen Orchestra UI",
     "rocky":         "free RHEL clone for servers",
     "alma":          "free RHEL clone, alternative to Rocky",
     "centos":        "upstream preview of the next RHEL",
+    "fedora_srv":    "Fedora as a server install, no desktop",
     # Security
     "kali":          "pentesting distro; net installer, pulls tools on install",
     "parrot":        "pentesting + privacy tools, lighter than Kali",
@@ -803,6 +869,7 @@ DESCRIPTIONS = {
     "systemrescue":  "Arch-based repair system; partitioning, data recovery",
     "hbcd":          "Windows PE toolkit; repair and diagnose Windows offline",
     "finnix":        "small text-only live system for sysadmin work",
+    "grml":          "Debian-based sysadmin live system, heavy on shell tooling",
     "gparted":       "graphical partition editor; resize/move/format disks",
     "clonezilla":    "disk and partition imaging, clone drives 1:1",
     "rescuezilla":   "the same imaging with a friendly GUI, reads Clonezilla images",

@@ -94,13 +94,40 @@ def check_leap_is_current(mod):
     return False
 
 
+def check_catalog_integrity(mod):
+    """Every entry needs a unique key and a description line for the picker."""
+    keys = [entry[0] for entry in mod.CATALOG]
+    ok = True
+
+    duplicates = sorted({k for k in keys if keys.count(k) > 1})
+    if duplicates:
+        print("  FAIL duplicate catalog keys: %s" % ", ".join(duplicates))
+        ok = False
+
+    undescribed = [k for k in keys if k not in mod.DESCRIPTIONS]
+    if undescribed:
+        print("  FAIL no DESCRIPTIONS entry: %s" % ", ".join(undescribed))
+        ok = False
+
+    orphaned = [k for k in mod.DESCRIPTIONS if k not in keys]
+    if orphaned:
+        print("  FAIL DESCRIPTIONS entry for unknown key: %s" % ", ".join(orphaned))
+        ok = False
+
+    if ok:
+        print("  ok   %d catalog entries, all keyed and described." % len(keys))
+    return ok
+
+
 def main():
     mod = load_module()
-    print("=== catalog resolvers ===")
+    print("=== catalog integrity ===")
+    integrity_ok = check_catalog_integrity(mod)
+    print("\n=== catalog resolvers ===")
     catalog_ok = check_catalog(mod)
     print("\n=== version sanity ===")
     leap_ok = check_leap_is_current(mod)
-    if catalog_ok and leap_ok:
+    if integrity_ok and catalog_ok and leap_ok:
         return 0
     print("\nSomething upstream changed. Fix the resolver, then rerun.")
     return 1
