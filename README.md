@@ -4,6 +4,11 @@ Keeps the ISOs on a [Ventoy](https://www.ventoy.net/) stick up to date. One
 script, no dependencies beyond the Python standard library, runs on Windows,
 Linux and macOS.
 
+Windows and Linux are verified against a real stick. macOS runs in CI on every
+change, but no one has yet pointed it at actual hardware -- the parts that can
+be checked without a USB port pass there, and finding a real drive is the part
+that cannot. Reports welcome.
+
 It auto-detects the newest version of every ISO in its catalog (directory
 listings, SourceForge RSS, the GitHub API, the NixOS channel bucket,
 massgrave.dev), downloads only what actually changed, and cleans up the
@@ -129,12 +134,24 @@ Python 3.6+. Nothing else -- standard library only.
 
 ## Development
 
+Two checks, for the two ways this breaks.
+
 The catalog resolves download URLs from ~50 foreign directory listings, so the
-usual way this breaks is an upstream reorganizing its mirror. `check_resolvers`
-asks every upstream whether its resolver still finds an ISO:
+usual failure is an upstream reorganizing its mirror. `check_resolvers` asks
+every upstream whether its resolver still finds an ISO:
 
 ```sh
 python tests/check_resolvers.py
+```
+
+The other failure is a platform difference. Drive detection takes a different
+route per system -- Win32 API, the removable flag under `/sys`, drvfs under
+WSL, `/Volumes` on macOS -- and the `ventoy.json` rewriting has to survive a
+case-insensitive filesystem. `check_platform` covers both, offline, and runs on
+Linux, Windows and macOS in CI:
+
+```sh
+python tests/check_platform.py
 ```
 
 It also pins one invariant that already bit once: openSUSE Leap must resolve to
@@ -143,9 +160,10 @@ filename, the resolver stopped matching, and instead of failing it quietly kept
 serving end-of-life 15.6 -- so "the resolver returned something" is not enough
 on its own.
 
-Failures are retried once before the check gives up, because a mirror that
-times out under parallel requests is a hiccup, not a broken layout. GitHub
-Actions runs the whole thing every Monday.
+Resolver failures are retried once before the check gives up, because a mirror
+that times out under parallel requests is a hiccup, not a broken layout. GitHub
+Actions runs both checks every Monday, and note that GitHub disables scheduled
+workflows after 60 days without repository activity.
 
 ## License
 
