@@ -100,7 +100,7 @@ import webbrowser
 import zipfile
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) VentoyISOUpdater/%s" % __version__
 CTX = ssl.create_default_context()
@@ -2543,15 +2543,44 @@ TEMPLATE_ROOT = "template"
 VENTOY_JSON = ("ventoy", "ventoy.json")
 
 
+def _real_dirname(parent, wanted):
+    """The on-disk spelling of `wanted` inside `parent`, or None.
+
+    A stick formatted exFAT is case-insensitive, so a folder made as
+    "Template/Win11" is found on Windows and missed on Linux -- the same stick
+    would quietly lose its templates depending on which system updates it.
+    Match without regard to case, then hand back the name as it is actually
+    spelled, so the path written into ventoy.json is one that exists.
+    """
+    try:
+        entries = os.listdir(parent)
+    except OSError:
+        return None
+    if wanted in entries:
+        return wanted
+    lowered = wanted.lower()
+    for name in entries:
+        if name.lower() == lowered:
+            return name
+    return None
+
+
+def template_dir(dest, folder):
+    """(stick_path, local_path) of /template/<folder>, in its real spelling."""
+    root = _real_dirname(dest, TEMPLATE_ROOT) or TEMPLATE_ROOT
+    sub = _real_dirname(os.path.join(dest, root), folder) or folder
+    return "/%s/%s" % (root, sub), os.path.join(dest, root, sub)
+
+
 def stick_templates(dest, folder):
     """Stick-absolute paths of the .xml templates in /template/<folder>."""
-    local = os.path.join(dest, TEMPLATE_ROOT, folder)
+    stick, local = template_dir(dest, folder)
     try:
         names = sorted(n for n in os.listdir(local)
                        if n.lower().endswith(".xml"))
     except OSError:
         return []
-    return ["/%s/%s/%s" % (TEMPLATE_ROOT, folder, n) for n in names]
+    return ["%s/%s" % (stick, n) for n in names]
 
 
 def windows_on_stick(dest, manifest):
@@ -2580,14 +2609,14 @@ def ensure_template_dirs(dest, manifest, create):
     """
     empty = []
     for folder in sorted({f for f, _name in windows_on_stick(dest, manifest)}):
-        path = os.path.join(dest, TEMPLATE_ROOT, folder)
-        if create and not os.path.isdir(path):
+        stick, local = template_dir(dest, folder)
+        if create and not os.path.isdir(local):
             try:
-                os.makedirs(path)
+                os.makedirs(local)
             except OSError:
                 continue
-        if os.path.isdir(path) and not stick_templates(dest, folder):
-            empty.append("/%s/%s" % (TEMPLATE_ROOT, folder))
+        if os.path.isdir(local) and not stick_templates(dest, folder):
+            empty.append(stick)
     return empty
 
 
@@ -2612,8 +2641,12 @@ def _is_managed(entry):
     templates = entry.get("template") if isinstance(entry, dict) else None
     if not isinstance(templates, list) or not templates:
         return False
+    # Compared lowercased for the same reason the folders are looked up that
+    # way: the stick is case-insensitive, so an entry written as /Template/Win11
+    # is ours just as much as /template/win11.
     prefix = "/%s/win" % TEMPLATE_ROOT
-    return all(isinstance(t, str) and t.startswith(prefix) for t in templates)
+    return all(isinstance(t, str) and t.lower().startswith(prefix)
+               for t in templates)
 
 
 def sync_auto_install(dest, manifest, args):
