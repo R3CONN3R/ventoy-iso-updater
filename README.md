@@ -90,7 +90,9 @@ filename -- so every update silently orphans the `auto_install` entry written
 for the previous build. The ISO still boots, the answer file is just never
 applied, and nothing says so.
 
-Templates are therefore assigned by folder instead of per image:
+Templates are therefore assigned by folder instead of per image. The folders are
+created for you as soon as a Windows image is on the stick, so there is nowhere
+to guess and nothing to look up:
 
 ```
 template/

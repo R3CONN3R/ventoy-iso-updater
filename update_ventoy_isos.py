@@ -2554,9 +2554,9 @@ def stick_templates(dest, folder):
     return ["/%s/%s/%s" % (TEMPLATE_ROOT, folder, n) for n in names]
 
 
-def build_auto_install(dest, manifest):
-    """The auto_install entries the Windows ISOs on the stick should have."""
-    entries, seen = [], set()
+def windows_on_stick(dest, manifest):
+    """[(folder, image_name)] of the Windows images actually present."""
+    found, seen = [], set()
     for key, _label, _cat, _tier, kind, payload in CATALOG:
         if kind != "windows":
             continue
@@ -2565,9 +2565,38 @@ def build_auto_install(dest, manifest):
             continue
         if not os.path.exists(os.path.join(dest, name)):
             continue                      # recorded but not actually here
-        templates = stick_templates(dest, "win%s" % payload["win"])
+        seen.add(name)
+        found.append(("win%s" % payload["win"], name))
+    return found
+
+
+def ensure_template_dirs(dest, manifest, create):
+    """Make sure a template folder exists for each Windows image on the stick.
+
+    Without this the feature is invisible: an empty stick has no /template, so
+    there is nowhere obvious to put an answer file and nothing hinting that
+    dropping one there would do anything. Returns the folders that exist but
+    are still empty, so the caller can say so.
+    """
+    empty = []
+    for folder in sorted({f for f, _name in windows_on_stick(dest, manifest)}):
+        path = os.path.join(dest, TEMPLATE_ROOT, folder)
+        if create and not os.path.isdir(path):
+            try:
+                os.makedirs(path)
+            except OSError:
+                continue
+        if os.path.isdir(path) and not stick_templates(dest, folder):
+            empty.append("/%s/%s" % (TEMPLATE_ROOT, folder))
+    return empty
+
+
+def build_auto_install(dest, manifest):
+    """The auto_install entries the Windows ISOs on the stick should have."""
+    entries = []
+    for folder, name in windows_on_stick(dest, manifest):
+        templates = stick_templates(dest, folder)
         if templates:
-            seen.add(name)
             entries.append({"image": "/" + name, "template": templates})
     return entries
 
@@ -2604,6 +2633,8 @@ def sync_auto_install(dest, manifest, args):
         print("\nventoy.json is not a JSON object -- leaving it alone.")
         return
 
+    empty = ensure_template_dirs(dest, manifest, create=not args.dry_run)
+
     existing = config.get("auto_install")
     existing = existing if isinstance(existing, list) else []
     foreign = [e for e in existing if not _is_managed(e)]
@@ -2611,6 +2642,12 @@ def sync_auto_install(dest, manifest, args):
 
     before = [e for e in existing if _is_managed(e)]
     if before == wanted:
+        # Nothing to rewrite, but an empty folder is still worth one line --
+        # it is the only sign that answer files can go there at all.
+        if empty:
+            print("\nNo unattended template in %s yet -- put an .xml there and"
+                  "\nit gets attached to the matching Windows images."
+                  % " or ".join(empty))
         return
     if not wanted and not foreign and "auto_install" not in config:
         return
@@ -2625,6 +2662,8 @@ def sync_auto_install(dest, manifest, args):
     for entry in before:
         if not any(e.get("image") == entry.get("image") for e in wanted):
             print("  %-9s %s" % ("dropped", entry.get("image")))
+    for folder in empty:
+        print("  %-9s %s  (put an .xml here)" % ("empty", folder))
 
     if args.dry_run:
         print("\n  (--dry-run -- ventoy.json not written)")
