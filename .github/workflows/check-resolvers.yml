@@ -1,9 +1,15 @@
-name: check resolvers
+name: checks
 
-# The script resolves download URLs from ~50 foreign directory listings. When
-# one of those upstreams changes its layout, the matching resolver breaks --
-# and without this job the first sign of it is a failed download in front of
-# the Ventoy stick. Runs weekly, on every push, and on demand.
+# Two different failure modes, so two jobs.
+#
+# The catalog resolves download URLs from ~50 foreign directory listings, and
+# upstream drift is what breaks it -- that needs the network and only needs
+# checking once, so it runs on Linux alone.
+#
+# Drive detection and the ventoy.json rewriting are where the platforms
+# actually differ: Win32 API, /sys, or /Volumes depending on where they run,
+# and a case-insensitive filesystem underneath. Those run everywhere the script
+# claims to support, offline.
 
 on:
   push:
@@ -15,9 +21,14 @@ on:
   workflow_dispatch:
 
 jobs:
-  resolvers:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  platform:
+    name: platform (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -30,6 +41,19 @@ jobs:
 
       - name: Compile
         run: python -m compileall -q update_ventoy_isos.py tests/
+
+      - name: Drive detection and ventoy.json handling
+        run: python tests/check_platform.py
+
+  resolvers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.9"
 
       - name: Resolve every catalog entry
         # Runners share outbound IPs, so the 60/hour anonymous GitHub API
