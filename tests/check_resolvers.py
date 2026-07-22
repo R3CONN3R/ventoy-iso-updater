@@ -13,9 +13,12 @@ Exit code is 1 if any resolver failed, 0 otherwise.
 
 import concurrent.futures as cf
 import importlib.util
+import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -119,6 +122,61 @@ def check_catalog_integrity(mod):
     return ok
 
 
+def check_auto_install(mod):
+    """sync_auto_install rewrites the user's ventoy.json, so pin its edges.
+
+    The two that matter are the ones that lose data if they regress: an entry
+    for a Windows build that has been replaced must be dropped rather than left
+    pointing at a missing ISO, and a hand-written entry for some other image
+    must survive untouched.
+    """
+
+    class Args(object):
+        dry_run = False
+
+    root = tempfile.mkdtemp(prefix="stick_")
+    try:
+        os.makedirs(os.path.join(root, "ventoy"))
+        os.makedirs(os.path.join(root, "template", "win11"))
+        open(os.path.join(root, "template", "win11", "a.xml"), "w").close()
+        current = "Win_11_25H2_English_99999.9999.iso"
+        open(os.path.join(root, current), "w").close()
+        open(os.path.join(root, "debian.iso"), "w").close()
+        with open(os.path.join(root, "ventoy", "ventoy.json"), "w") as fh:
+            json.dump({
+                "theme": {"file": "/theme/x.txt"},
+                "auto_install": [
+                    {"image": "/Win_11_25H2_English_00000.0000.iso",
+                     "template": ["/template/win11/a.xml"]},
+                    {"image": "/debian.iso", "template": ["/mine/preseed.cfg"]},
+                ]}, fh)
+
+        mod.sync_auto_install(root, {"win11_en": {"filename": current}}, Args())
+
+        with open(os.path.join(root, "ventoy", "ventoy.json")) as fh:
+            config = json.load(fh)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    images = [e.get("image") for e in config.get("auto_install", [])]
+    problems = []
+    if "/Win_11_25H2_English_00000.0000.iso" in images:
+        problems.append("stale entry for a replaced build was kept")
+    if "/" + current not in images:
+        problems.append("no entry for the current image")
+    if "/debian.iso" not in images:
+        problems.append("hand-written entry was discarded")
+    if "theme" not in config:
+        problems.append("the rest of ventoy.json was lost")
+
+    if problems:
+        for problem in problems:
+            print("  FAIL auto-install   %s" % problem)
+        return False
+    print("  ok   auto-install   stale dropped, current wired, foreign kept")
+    return True
+
+
 def main():
     mod = load_module()
     print("=== catalog integrity ===")
@@ -127,7 +185,8 @@ def main():
     catalog_ok = check_catalog(mod)
     print("\n=== version sanity ===")
     leap_ok = check_leap_is_current(mod)
-    if integrity_ok and catalog_ok and leap_ok:
+    auto_ok = check_auto_install(mod)
+    if integrity_ok and catalog_ok and leap_ok and auto_ok:
         return 0
     print("\nSomething upstream changed. Fix the resolver, then rerun.")
     return 1

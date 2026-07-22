@@ -25,6 +25,12 @@ has replaced -- including ones the manifest never knew about -- lists each one
 with the file that superseded it and deletes them once you confirm
 (--cleanup {ask,yes,no}).
 
+Finally the auto_install section of ventoy/ventoy.json is rebuilt: every .xml in
+/template/win11 is attached to each Windows 11 image on the stick, /template/
+win10 likewise, so unattended-setup answer files stay attached across the build
+renames that Windows ISO updates bring. Entries pointing elsewhere are treated
+as hand-written and left untouched.
+
 On start you choose what to download from a catalog of ~60 Linux distros,
 hypervisors, Windows ISOs and rescue tools: a preset (Standard / Advanced /
 Everything) or a custom pick (numbers/ranges like 1,3,5-9). Presets:
@@ -2521,6 +2527,127 @@ def _massgrave_handoff(dest, manifest, items, summary, watch=True):
 
 
 # --------------------------------------------------------------------------- #
+# Ventoy auto-install templates
+#
+# Ventoy attaches an unattended-setup template to an image by exact path. The
+# Windows ISOs carry their build number in the filename, so every update
+# silently orphans the entry written for the previous build -- the ISO boots,
+# and the answer file it was supposed to use is simply not applied.
+#
+# Templates are therefore assigned by the folder they sit in rather than named
+# per image: everything in /template/win11 applies to every Windows 11 image on
+# the stick, /template/win10 likewise. The image paths are rebuilt from the
+# manifest on every run, so they follow the ISOs through updates and renames.
+# --------------------------------------------------------------------------- #
+TEMPLATE_ROOT = "template"
+VENTOY_JSON = ("ventoy", "ventoy.json")
+
+
+def stick_templates(dest, folder):
+    """Stick-absolute paths of the .xml templates in /template/<folder>."""
+    local = os.path.join(dest, TEMPLATE_ROOT, folder)
+    try:
+        names = sorted(n for n in os.listdir(local)
+                       if n.lower().endswith(".xml"))
+    except OSError:
+        return []
+    return ["/%s/%s/%s" % (TEMPLATE_ROOT, folder, n) for n in names]
+
+
+def build_auto_install(dest, manifest):
+    """The auto_install entries the Windows ISOs on the stick should have."""
+    entries, seen = [], set()
+    for key, _label, _cat, _tier, kind, payload in CATALOG:
+        if kind != "windows":
+            continue
+        name = (manifest.get(key) or {}).get("filename")
+        if not name or name in seen:
+            continue
+        if not os.path.exists(os.path.join(dest, name)):
+            continue                      # recorded but not actually here
+        templates = stick_templates(dest, "win%s" % payload["win"])
+        if templates:
+            seen.add(name)
+            entries.append({"image": "/" + name, "template": templates})
+    return entries
+
+
+def _is_managed(entry):
+    """Whether an auto_install entry came from here.
+
+    Ownership is decided by the templates an entry points at, not by the image
+    it names. An entry left from a previous Windows build names an ISO that no
+    longer exists, and matching on current names would preserve precisely the
+    stale entries this is meant to clear out.
+    """
+    templates = entry.get("template") if isinstance(entry, dict) else None
+    if not isinstance(templates, list) or not templates:
+        return False
+    prefix = "/%s/win" % TEMPLATE_ROOT
+    return all(isinstance(t, str) and t.startswith(prefix) for t in templates)
+
+
+def sync_auto_install(dest, manifest, args):
+    """Rewrite ventoy.json's auto_install to match the templates on the stick.
+
+    Only entries this script owns are touched; hand-written ones for other
+    images are carried over untouched, and the rest of ventoy.json -- theme,
+    menu settings, anything else -- is preserved as it was.
+    """
+    path = os.path.join(dest, *VENTOY_JSON)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            config = json.load(fh)
+    except (OSError, ValueError):
+        config = {}
+    if not isinstance(config, dict):
+        print("\nventoy.json is not a JSON object -- leaving it alone.")
+        return
+
+    existing = config.get("auto_install")
+    existing = existing if isinstance(existing, list) else []
+    foreign = [e for e in existing if not _is_managed(e)]
+    wanted = build_auto_install(dest, manifest)
+
+    before = [e for e in existing if _is_managed(e)]
+    if before == wanted:
+        return
+    if not wanted and not foreign and "auto_install" not in config:
+        return
+
+    print("\n" + "-" * 12 + " AUTO-INSTALL TEMPLATES " + "-" * 12)
+    for entry in wanted:
+        was = next((e for e in before if e.get("image") == entry["image"]), None)
+        mark = "unchanged" if was == entry else ("updated" if was else "added")
+        print("  %-9s %s" % (mark, entry["image"]))
+        for template in entry["template"]:
+            print("            %s" % template)
+    for entry in before:
+        if not any(e.get("image") == entry.get("image") for e in wanted):
+            print("  %-9s %s" % ("dropped", entry.get("image")))
+
+    if args.dry_run:
+        print("\n  (--dry-run -- ventoy.json not written)")
+        return
+
+    if wanted or foreign:
+        config["auto_install"] = foreign + wanted
+    else:
+        config.pop("auto_install", None)
+
+    tmp = path + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(config, fh, indent=4, ensure_ascii=False)
+            fh.write("\n")
+        os.replace(tmp, path)
+        print("\n  ventoy.json updated.")
+    except OSError as exc:
+        print("\n  could NOT write ventoy.json: %s" % exc)
+
+
+# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 def main():
@@ -2677,6 +2804,10 @@ def main():
     cleanup_superseded(dest, manifest,
                        current_files(manifest, resolved, extra),
                        "no" if args.dry_run else args.cleanup, summary)
+
+    # After the cleanup, so the filenames the templates are wired to are the
+    # ones that actually survived this run.
+    sync_auto_install(dest, manifest, args)
 
     # ---- summary -------------------------------------------------------- #
     if not summary:

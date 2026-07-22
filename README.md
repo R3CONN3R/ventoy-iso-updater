@@ -84,6 +84,29 @@ what each one costs; pass `--windows` to skip that prompt.
 | `uup` | pulls the build from Windows Update and assembles the ISO locally with DISM | official and unattended | Windows only, needs admin, ~40 min and ~15 GB free |
 | `fido` | resolves an official direct Microsoft download link | light, no admin, no browser | Windows only, blocked unpredictably by Microsoft's anti-bot "Sentinel" |
 
+**Keeps unattended-install templates attached.** Ventoy matches an answer file
+to an image by exact path, and the Windows ISOs carry their build number in the
+filename -- so every update silently orphans the `auto_install` entry written
+for the previous build. The ISO still boots, the answer file is just never
+applied, and nothing says so.
+
+Templates are therefore assigned by folder instead of per image:
+
+```
+template/
+├── win10/          -> applied to every Windows 10 image on the stick
+│   └── unattend.xml
+└── win11/          -> applied to every Windows 11 image
+    └── autounattend.xml
+```
+
+After each run the `auto_install` section of `ventoy/ventoy.json` is rebuilt
+from the manifest, so the entries follow the ISOs through renames, drop the
+ones whose image is gone, and pick up any `.xml` added to those folders. Several
+templates in a folder are all attached, and Ventoy then offers the choice at
+boot. Entries pointing anywhere other than `template/win10` or `template/win11`
+are treated as hand-written and left alone, as is the rest of the file.
+
 ## Options
 
 | Flag | Effect |
