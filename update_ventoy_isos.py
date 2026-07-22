@@ -127,8 +127,25 @@ UUP_GET = "https://uupdump.net/get.php"
 # --------------------------------------------------------------------------- #
 # HTTP helpers
 # --------------------------------------------------------------------------- #
+def _auth_for(url):
+    """Authorization header for the GitHub API when a token is in the env.
+
+    Unauthenticated the API allows 60 requests an hour per IP. Three catalog
+    entries and the Ventoy check use it, which is fine from a home connection
+    but not from shared CI runners, where that budget is routinely already
+    spent by someone else. A token raises the limit to 5000; without one
+    nothing changes.
+    """
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token and urlparse(url).netloc.lower() == "api.github.com":
+        return {"Authorization": "Bearer %s" % token}
+    return {}
+
+
 def http_get(url, timeout=45):
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    headers = {"User-Agent": UA}
+    headers.update(_auth_for(url))
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout, context=CTX) as r:
         return r.read().decode("utf-8", "replace")
 

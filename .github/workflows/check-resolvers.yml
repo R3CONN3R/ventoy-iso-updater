@@ -32,4 +32,9 @@ jobs:
         run: python -m compileall -q update_ventoy_isos.py tests/
 
       - name: Resolve every catalog entry
+        # Runners share outbound IPs, so the 60/hour anonymous GitHub API
+        # budget is often already spent by the time this job starts. The
+        # script picks the token up from the environment.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python tests/check_resolvers.py
