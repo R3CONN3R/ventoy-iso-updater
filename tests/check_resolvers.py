@@ -16,6 +16,7 @@ import importlib.util
 import os
 import re
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -119,6 +120,37 @@ def check_catalog_integrity(mod):
     return ok
 
 
+def check_ventoy(mod):
+    """The Ventoy self-update must resolve, and must refuse ordinary folders.
+
+    looks_like_ventoy_stick() decides whether the user is offered a bootloader
+    rewrite of the disk behind --dest. A false positive there points that offer
+    at whatever disk the folder happens to live on, so the negative cases
+    matter more than the happy path and are pinned here.
+    """
+    ok = True
+    try:
+        version, _url, asset = mod.latest_ventoy()
+        print("  ok   ventoy         newest release %s -> %s" % (version, asset))
+    except Exception as exc:
+        print("  FAIL ventoy         %s: %s" % (type(exc).__name__, exc))
+        ok = False
+
+    scratch = tempfile.mkdtemp()
+    try:
+        must_refuse = [scratch, os.path.join(scratch, "nope"),
+                       os.path.abspath(os.sep)]
+        offered = [p for p in must_refuse if mod.looks_like_ventoy_stick(p)]
+    finally:
+        os.rmdir(scratch)
+    if offered:
+        print("  FAIL ventoy-guard   would offer a bootloader rewrite for: %s"
+              % ", ".join(offered))
+        return False
+    print("  ok   ventoy-guard   plain folders and the root disk are refused")
+    return ok
+
+
 def main():
     mod = load_module()
     print("=== catalog integrity ===")
@@ -127,7 +159,8 @@ def main():
     catalog_ok = check_catalog(mod)
     print("\n=== version sanity ===")
     leap_ok = check_leap_is_current(mod)
-    if integrity_ok and catalog_ok and leap_ok:
+    ventoy_ok = check_ventoy(mod)
+    if integrity_ok and catalog_ok and leap_ok and ventoy_ok:
         return 0
     print("\nSomething upstream changed. Fix the resolver, then rerun.")
     return 1

@@ -43,6 +43,12 @@ That entry is the one to take on a stick this script has filled before -- it
 keeps the selection you already made. On a fresh stick it isn't offered at
 all, so there is nothing to think about the first time round.
 
+Before any of that, the script checks whether Ventoy itself has a newer release
+and offers to install it (default yes, --no-ventoy skips the check). The update
+is handed to Ventoy's own installer; it is only offered for the root of a
+removable drive that actually carries a Ventoy directory, so no ordinary --dest
+can put a bootloader rewrite one keystroke away.
+
 If --dest is omitted, the script lists the detected removable USB drives and
 lets you pick one interactively -- no need to type the drive letter. Detection
 uses the Win32 drive type on Windows, the removable flag in /sys on Linux, and
@@ -85,6 +91,7 @@ import shutil
 import ssl
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 import time
@@ -1171,6 +1178,162 @@ def download_memtest(dest_dir):
         shutil.copy(os.path.join(tmp, img),
                     os.path.join(dest_dir, "memtest86-usb.img"))
     shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+# Ventoy itself
+#
+# Ventoy records its own version on the VTOYEFI partition, which needs raw
+# device access to read -- exactly what this script avoids needing. So the
+# installed version is not detectable here; what is remembered instead is the
+# version this script last installed, under the "ventoy" manifest key. On a
+# stick it has never touched, the answer is honestly "unknown".
+#
+# The update itself is handed to Ventoy's own installer rather than reimplemented
+# -- it rewrites a bootloader, and there is exactly one correct way to do that.
+# --------------------------------------------------------------------------- #
+VENTOY_RELEASES = "https://api.github.com/repos/ventoy/Ventoy/releases/latest"
+
+
+def latest_ventoy():
+    """(version, url, asset_name) of the newest Ventoy package for this OS."""
+    data = json.loads(http_get(VENTOY_RELEASES))
+    version = (data.get("tag_name") or "").lstrip("vV")
+    wanted = "-windows.zip" if os.name == "nt" else "-linux.tar.gz"
+    for asset in data.get("assets", []):
+        if asset["name"].endswith(wanted):
+            return version, asset["browser_download_url"], asset["name"]
+    raise RuntimeError("no %s asset in Ventoy %s" % (wanted, version or "?"))
+
+
+def ventoy_device(dest):
+    """The raw device Ventoy's Linux installer expects for `dest`.
+
+    Ventoy2Disk.sh wants the whole disk (/dev/sdb), not the partition the stick
+    is mounted from (/dev/sdb1), so the trailing partition number is dropped
+    the same way _block_is_removable() walks up to the parent disk.
+    """
+    target = os.path.realpath(dest)
+    best, source = "", None
+    for device, mnt, _fs in _proc_mounts():
+        if device.startswith("/dev/") and target.startswith(mnt) \
+                and len(mnt) > len(best):
+            best, source = mnt, device
+    if not source:
+        return None
+    name = os.path.basename(source)
+    while name and not os.path.isdir("/sys/block/%s" % name):
+        name = name[:-1]
+    return "/dev/%s" % name if name else None
+
+
+def _run_ventoy_installer(pkg_dir, dest):
+    """Invoke Ventoy's own updater for the stick. True if it reported success."""
+    if os.name == "nt":
+        exe = os.path.join(pkg_dir, "Ventoy2Disk.exe")
+        drive = os.path.splitdrive(os.path.abspath(dest))[0]
+        if not drive:
+            print("    cannot tell which drive letter %s is on" % dest)
+            return False
+        cmd = [exe, "VTOYCLI", "/U", "/Drive:%s" % drive]
+    else:
+        device = ventoy_device(dest)
+        if not device:
+            print("    cannot map %s to a device node" % dest)
+            return False
+        cmd = ["sh", os.path.join(pkg_dir, "Ventoy2Disk.sh"), "-u", device]
+
+    print("    running: %s" % " ".join(cmd))
+    try:
+        return subprocess.call(cmd, cwd=pkg_dir) == 0
+    except Exception as exc:
+        print("    could not start the installer: %s" % exc)
+        return False
+
+
+def looks_like_ventoy_stick(dest):
+    """Whether `dest` is plausibly the root of a Ventoy stick.
+
+    The updater rewrites the bootloader of whatever disk `dest` sits on, so it
+    must never be offered for an ordinary folder: `--dest C:\\isos` would put
+    "rewrite this disk" one Enter away from the system drive. Required are the
+    root of a removable drive, and Ventoy's own directory on it.
+    """
+    root = os.path.abspath(dest)
+    if os.path.dirname(root) != root:            # a subfolder, not a drive root
+        return False
+    removable = {os.path.abspath(p) for p, _label, _size in detect_usb_drives()}
+    return root in removable and os.path.isdir(os.path.join(root, "ventoy"))
+
+
+def maybe_update_ventoy(dest, manifest, args):
+    """Offer to update Ventoy on the stick before touching any ISOs.
+
+    Deliberately the first thing that happens: updating Ventoy rewrites the
+    bootloader, and doing that after a long download session is the worst
+    possible moment for something to go wrong.
+    """
+    if args.no_ventoy or not looks_like_ventoy_stick(dest):
+        return
+    try:
+        version, url, asset = latest_ventoy()
+    except Exception as exc:
+        print("Ventoy: could not check for updates (%s)\n" % exc)
+        return
+
+    known = (manifest.get("ventoy") or {}).get("version")
+    if known == version:
+        print("Ventoy: %s is the newest release.\n" % version)
+        return
+
+    print("\n" + "-" * 15 + " VENTOY ITSELF " + "-" * 15)
+    print("Newest release : %s" % version)
+    print("On this stick  : %s"
+          % (known or "unknown -- not installed by this script"))
+    print("\nThis runs Ventoy's own installer to rewrite the bootloader. Your")
+    print("ISOs and files are not touched, but it is a disk write -- do not")
+    print("pull the stick while it runs.")
+    if os.name != "nt" and _is_wsl():
+        print("\nNot possible from WSL: it has no raw access to the USB device.")
+        print("Run this from Windows instead.\n")
+        return
+    if args.dry_run:
+        print("\n  (--dry-run -- not touching it)\n")
+        return
+
+    try:
+        answer = input("\nUpdate Ventoy to %s? [Y/n]: " % version).strip().lower()
+    except EOFError:
+        answer = ""
+    if answer in ("n", "no", "nein"):
+        print("Leaving Ventoy alone.\n")
+        return
+
+    work = tempfile.mkdtemp(prefix="ventoy_")
+    try:
+        pkg = os.path.join(work, asset)
+        expected = None if args.no_verify else remote_sha256(url, asset)
+        download(url, pkg, expected)
+        if asset.endswith(".zip"):
+            with zipfile.ZipFile(pkg) as archive:
+                archive.extractall(work)
+        else:
+            with tarfile.open(pkg) as archive:
+                archive.extractall(work)
+        roots = [os.path.join(work, n) for n in os.listdir(work)
+                 if os.path.isdir(os.path.join(work, n))]
+        if not roots:
+            raise RuntimeError("package contained no directory")
+        if _run_ventoy_installer(roots[0], dest):
+            manifest["ventoy"] = {"version": version, "url": url}
+            save_manifest(dest, manifest)
+            print("    Ventoy updated to %s\n" % version)
+        else:
+            print("    Ventoy update did not complete -- stick left as it was\n")
+    except Exception as exc:
+        print("    Ventoy update failed: %s\n" % exc)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -2521,6 +2684,8 @@ def main():
     ap.add_argument("--no-verify", action="store_true",
                     help="skip the SHA-256 check against the checksum file "
                          "published next to the image")
+    ap.add_argument("--no-ventoy", action="store_true",
+                    help="do not check whether Ventoy itself can be updated")
     ap.add_argument("--no-mirror-test", action="store_true",
                     help="skip the fastest-mirror speed test; use the default "
                          "source directly")
@@ -2546,6 +2711,10 @@ def main():
     if not args.dry_run:
         os.makedirs(dest, exist_ok=True)
     manifest = load_manifest(dest)
+
+    # Before anything else: a bootloader rewrite belongs at the start of a run,
+    # not after an hour of downloads.
+    maybe_update_ventoy(dest, manifest, args)
 
     selection = choose_selection(args.preset, dest, manifest)
     # Windows is never part of a preset -- ask for it separately. That prompt
