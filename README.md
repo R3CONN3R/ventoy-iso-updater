@@ -18,7 +18,18 @@ python update_ventoy_isos.py --force         # ignore the manifest, redownload
 ```
 
 Without `--dest` the script lists the removable drives it found and lets you
-choose one, so there is no drive letter to type.
+choose one, so there is no drive letter to type. Detection uses the Win32 drive
+type on Windows, the removable flag under `/sys` on Linux, and `/Volumes` on
+macOS.
+
+It also works under WSL, where the stick is a drvfs mount with no block device
+behind it: there the script asks Windows which drive is removable. If that WSL
+setup has `.exe` interop disabled -- common on Arch images booting systemd,
+where `systemd-binfmt` drops the `WSLInterop` registration -- it falls back to
+the drvfs mounts under `/mnt/`, leaving out the system drive, and labels them
+as unverified. WSL only automounts drives that existed when it started, so a
+stick plugged in later needs mounting first; the picker prints the exact
+command when it sees one.
 
 ## What it does
 

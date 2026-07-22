@@ -42,7 +42,11 @@ keeps the selection you already made. On a fresh stick it isn't offered at
 all, so there is nothing to think about the first time round.
 
 If --dest is omitted, the script lists the detected removable USB drives and
-lets you pick one interactively -- no need to type the drive letter.
+lets you pick one interactively -- no need to type the drive letter. Detection
+uses the Win32 drive type on Windows, the removable flag in /sys on Linux, and
+/Volumes on macOS. Under WSL it asks Windows which drive is removable, or, if
+that setup has .exe interop disabled, falls back to the drvfs mounts under
+/mnt/ with the system drive left out.
 
 For distros that publish a machine-readable mirror list (currently Arch), the
 script briefly speed-tests the best-scored mirrors and downloads from the
@@ -1421,6 +1425,127 @@ def _win_volume_label(root):
     return buf.value
 
 
+def _mount_total(path):
+    try:
+        return shutil.disk_usage(path).total
+    except Exception:
+        return 0
+
+
+def _is_wsl():
+    """True inside WSL, where the Windows drives appear as drvfs under /mnt."""
+    if "WSL_DISTRO_NAME" in os.environ or "WSL_INTEROP" in os.environ:
+        return True
+    try:
+        with open("/proc/version") as fh:
+            return "microsoft" in fh.read().lower()
+    except OSError:
+        return False
+
+
+def _proc_mounts():
+    """[(device, mountpoint, fstype)] from /proc/mounts.
+
+    Mountpoints are escaped in that file -- a space is written "\\040" -- so
+    the octal escapes have to be decoded before the path is usable.
+    """
+    entries = []
+    try:
+        with open("/proc/mounts") as fh:
+            raw = fh.read()
+    except OSError:
+        return entries
+    for line in raw.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mnt = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), parts[1])
+        entries.append((parts[0], mnt, parts[2]))
+    return entries
+
+
+def _block_is_removable(device):
+    """Ask /sys whether the disk behind a /dev node is removable.
+
+    Partitions carry no removable flag of their own, so walk up from the
+    partition to the whole-disk name by trimming characters until /sys/block
+    knows it: sdb1 -> sdb, nvme0n1p2 -> nvme0n1, mmcblk0p1 -> mmcblk0.
+    """
+    name = os.path.basename(device)
+    while name and not os.path.isdir("/sys/block/%s" % name):
+        name = name[:-1]
+    if not name:
+        return False
+    try:
+        with open("/sys/block/%s/removable" % name) as fh:
+            return fh.read().strip() == "1"
+    except OSError:
+        return False
+
+
+def _wsl_windows_removable():
+    """[(letter, label, size)] of removable Windows drives, asked from Windows.
+
+    Under WSL a stick is a drvfs mount, so /sys has no block device to check
+    and nothing on the Linux side distinguishes it from the system drive. The
+    only source of truth is Windows itself.
+    """
+    cmd = ("Get-CimInstance Win32_LogicalDisk | "
+           "Where-Object { $_.DriveType -eq 2 } | "
+           "ForEach-Object { \"$($_.DeviceID)|$($_.VolumeName)|$($_.Size)\" }")
+    try:
+        out = subprocess.check_output(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", cmd],
+            stderr=subprocess.DEVNULL, timeout=25)
+    except Exception:
+        return []
+    found = []
+    for line in out.decode("utf-8", "replace").splitlines():
+        parts = line.strip().split("|")
+        if len(parts) != 3 or not parts[0][:1].isalpha():
+            continue
+        found.append((parts[0][0].lower(), parts[1] or "(no label)",
+                      int(parts[2]) if parts[2].isdigit() else 0))
+    return found
+
+
+def _wsl_drvfs_candidates():
+    """Windows drives under /mnt/<letter>, used when interop is unavailable.
+
+    Asking Windows is exact but needs .exe interop, and some setups do not have
+    it -- notably Arch images booting systemd, where systemd-binfmt drops WSL's
+    binfmt registration and every .exe fails with "Exec format error". Fall
+    back to the drvfs mounts themselves and label them as unverified, because
+    nothing on this side says which drive is removable.
+
+    /mnt/c is skipped on purpose: the picker treats the first entry as the
+    default, and the system drive is the one answer that must never be it.
+    """
+    found = []
+    for _device, mnt, fs in _proc_mounts():
+        if fs not in ("drvfs", "9p", "virtiofs"):
+            continue
+        match = re.match(r"^/mnt/([a-z])$", mnt)
+        if not match or match.group(1) == "c":
+            continue
+        found.append((mnt,
+                      "%s: windows drive (unverified)" % match.group(1).upper(),
+                      _mount_total(mnt)))
+    return found
+
+
+def wsl_unmounted_drives():
+    """[(letter, label)] of removable Windows drives WSL has not mounted.
+
+    WSL only automounts what existed when it started, so a stick plugged in
+    afterwards stays invisible until it is mounted by hand.
+    """
+    if not _is_wsl():
+        return []
+    return [(letter, label) for letter, label, _size in _wsl_windows_removable()
+            if not os.path.ismount("/mnt/%s" % letter)]
+
+
 def detect_usb_drives():
     """Return [(path, label, total_bytes)] of removable drives, best-effort."""
     drives = []
@@ -1440,26 +1565,47 @@ def detect_usb_drives():
             except Exception:
                 total = 0
             drives.append((root, _win_volume_label(root) or "(no label)", total))
-    else:
-        # Linux (/media/<user>, /run/media/<user>) and macOS (/Volumes)
-        user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
-        roots = ["/Volumes",
-                 os.path.join("/media", user), "/media",
-                 os.path.join("/run/media", user)]
-        seen = set()
-        for base in roots:
-            if not os.path.isdir(base):
+        return drives
+
+    seen = set()
+
+    # Linux: /proc/mounts plus the removable flag in /sys is authoritative and,
+    # unlike scanning fixed directories, does not care where the desktop
+    # environment decided to mount the stick -- or whether one mounted it at
+    # all and it sits somewhere like /mnt/stick.
+    for device, mnt, _fs in _proc_mounts():
+        if not device.startswith("/dev/") or mnt in seen:
+            continue
+        if not _block_is_removable(device):
+            continue
+        seen.add(mnt)
+        drives.append((mnt, os.path.basename(mnt) or mnt, _mount_total(mnt)))
+
+    # WSL: those are drvfs mounts with no block device behind them, so they
+    # never show up above. Ask Windows which of them is removable.
+    if _is_wsl():
+        exact = [("/mnt/%s" % letter, label, size)
+                 for letter, label, size in _wsl_windows_removable()]
+        for path, label, size in exact or _wsl_drvfs_candidates():
+            if path in seen or not os.path.ismount(path):
                 continue
-            for entry in sorted(os.listdir(base)):
-                path = os.path.join(base, entry)
-                if not os.path.ismount(path) or path in seen:
-                    continue
-                seen.add(path)
-                try:
-                    total = shutil.disk_usage(path).total
-                except Exception:
-                    total = 0
-                drives.append((path, entry, total))
+            seen.add(path)
+            drives.append((path, label, size or _mount_total(path)))
+
+    # macOS has no /sys and mounts removable volumes under /Volumes, so keep
+    # the directory scan for it -- and as a fallback for anything the checks
+    # above did not describe.
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+    for base in ("/Volumes", os.path.join("/media", user), "/media",
+                 os.path.join("/run/media", user)):
+        if not os.path.isdir(base):
+            continue
+        for entry in sorted(os.listdir(base)):
+            path = os.path.join(base, entry)
+            if path in seen or not os.path.ismount(path):
+                continue
+            seen.add(path)
+            drives.append((path, entry, _mount_total(path)))
     return drives
 
 
@@ -1472,6 +1618,14 @@ def choose_dest():
         print("  [%d] %s  %-20s  %s" % (i, path, label, size))
     if not drives:
         print("  (no removable USB drives detected)")
+    # WSL automounts only what was plugged in when it started, so a stick added
+    # later is invisible until it is mounted -- say so instead of letting the
+    # user conclude the drive is broken.
+    for letter, label in wsl_unmounted_drives():
+        print("  note: Windows drive %s: (%s) is not mounted in WSL yet:"
+              % (letter.upper(), label))
+        print("        sudo mkdir -p /mnt/%s && sudo mount -t drvfs %s: /mnt/%s"
+              % (letter, letter.upper(), letter))
     print("  [o] other path (type it in)")
     print("  [.] default folder ./isos\n")
 
