@@ -14,6 +14,7 @@ versions it replaced.
 ```sh
 python update_ventoy_isos.py                 # interactive: pick drive, then ISOs
 python update_ventoy_isos.py --dest E:\      # explicit target
+python update_ventoy_isos.py --dry-run       # report only, write nothing
 python update_ventoy_isos.py --force         # ignore the manifest, redownload
 ```
 
@@ -37,7 +38,20 @@ command when it sees one.
 `ventoy_versions.json` next to the ISOs. On the next run the newest version
 online is compared against that record; rolling releases that keep the same
 filename are checked via the remote size / `Last-Modified` header. ISOs that
-were already on the stick are adopted instead of re-downloaded.
+were already on the stick are adopted instead of re-downloaded -- including the
+case where a download finished but was never recorded, which otherwise cost a
+full re-fetch of several GB.
+
+**Verifies what it downloads.** Where the source publishes a checksum -- a
+`SHA256SUMS` for the directory, or a per-image `.sha256` / `.DIGESTS` -- the
+finished file is hashed and compared before it is put in place, so a corrupted
+or tampered image never reaches the stick. Roughly half of the catalog
+publishes one; the rest falls back to the size check, and each download says
+which of the two it got. `--no-verify` turns it off.
+
+**Shows what it would do.** `--dry-run` runs the whole detection pass, prints
+what would be downloaded, skipped or deleted, and writes nothing at all -- no
+ISOs, no manifest, not even the target folder.
 
 **Shows you what is on the stick** before you pick anything -- item, exact
 filename, size -- and marks those entries in the picker, so nothing gets
@@ -60,22 +74,25 @@ live speed in MB/s and Mbit/s. Where a machine-readable mirror list exists
 (currently Arch), the best-scored mirrors are briefly speed-tested and the
 fastest one is used -- disable with `--no-mirror-test`.
 
-**Windows ISOs** are not part of any preset because they cannot be fetched
-unattended. The default (`--windows massgrave`) opens the massgrave.dev pages,
-tells you which entry to pick, then watches the stick and your Downloads
-folder: whatever ISO you download is matched, renamed to the canonical name and
-moved onto the stick automatically. Two automatic alternatives exist:
-`--windows fido` resolves an official direct Microsoft link (light, no admin,
-but subject to Microsoft's anti-bot "Sentinel"), `--windows uup` pulls the build
-from Windows Update and assembles the ISO locally (no bot protection, but needs
-administrator rights, ~40 minutes and ~15 GB of scratch space).
+**Windows ISOs** are in no preset, because none of the three ways to get them
+runs unattended. Pick them and the script asks which method to use, spelling out
+what each one costs; pass `--windows` to skip that prompt.
+
+| Method | What it does | Upside | Downside |
+| --- | --- | --- | --- |
+| `massgrave` *(default)* | opens the massgrave.dev page, says which entry to click, then watches your Downloads folder and files the ISO onto the stick | always works, no admin | you click the download yourself |
+| `uup` | pulls the build from Windows Update and assembles the ISO locally with DISM | official and unattended | Windows only, needs admin, ~40 min and ~15 GB free |
+| `fido` | resolves an official direct Microsoft download link | light, no admin, no browser | Windows only, blocked unpredictably by Microsoft's anti-bot "Sentinel" |
 
 ## Options
 
 | Flag | Effect |
 | --- | --- |
 | `--dest PATH` | target folder / Ventoy drive (omit for the interactive picker) |
+| `--dry-run` | report what would change; write nothing |
 | `--force` | re-download everything, ignoring the manifest |
+| `--no-verify` | skip the SHA-256 check |
+| `--version` | print the version and exit |
 | `--preset standard\|advanced\|everything\|custom` | skip the menu |
 | `--cleanup ask\|yes\|no` | what to do with superseded ISOs (default `ask`) |
 | `--no-mirror-test` | skip the fastest-mirror speed test |

@@ -7,15 +7,18 @@ Ventoy stick (directory listings, SourceForge RSS, GitHub API, the NixOS
 channel bucket and the massgrave.dev markdown), then downloads them one after
 another (never in parallel). Tails is excluded.
 
-Cross-platform (Windows / Linux / macOS), Python 3.6+, standard library only.
-Downloads run through urllib with resume support (HTTP Range) and show, per
-file, the serving host plus the live speed in MB/s and Mbit/s.
+Cross-platform (Windows / Linux / macOS / WSL), Python 3.6+, standard library
+only. Downloads run through urllib with resume support (HTTP Range) and show,
+per file, the serving host plus the live speed in MB/s and Mbit/s. Where the
+source publishes a checksum file next to the image, the finished download is
+verified against it before it is put in place (--no-verify turns that off).
 
 Each downloaded ISO's version is recorded in a manifest (ventoy_versions.json)
 next to the ISOs on the stick. On every rerun the script compares the newest
 version online against that record and only downloads what actually changed --
 rolling releases that keep the same filename are checked via the remote file's
-size / Last-Modified header. Use --force to re-download everything.
+size / Last-Modified header. Use --force to re-download everything, or
+--dry-run to see what a run would change without writing anything.
 
 After the downloads the script sweeps the stick for ISOs that a newer release
 has replaced -- including ones the manifest never knew about -- lists each one
@@ -24,8 +27,7 @@ with the file that superseded it and deletes them once you confirm
 
 On start you choose what to download from a catalog of ~60 Linux distros,
 hypervisors, Windows ISOs and rescue tools: a preset (Standard / Advanced /
-Everything) or
-a custom pick (numbers/ranges like 1,3,5-9). Presets:
+Everything) or a custom pick (numbers/ranges like 1,3,5-9). Presets:
     Standard    -- one mainstream pick per job: the common desktops, a server
                    netinst, and the rescue tools you actually reach for
     Advanced    -- standard + the sibling releases (Fedora GNOME next to KDE,
@@ -68,11 +70,13 @@ administrator rights and roughly 40 minutes plus ~15 GB of scratch space.
 
 Usage:
     python update_ventoy_isos.py                 # interactive drive picker
-    python update_ventoy_isos.py --dest E:\\      # explicit target
+    python update_ventoy_isos.py --dest E:\\     # explicit target
+    python update_ventoy_isos.py --dry-run       # report only, write nothing
     python update_ventoy_isos.py --force         # ignore manifest, redownload
 """
 
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -82,6 +86,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import urllib.error
 import urllib.request
@@ -89,19 +94,24 @@ import webbrowser
 import zipfile
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) VentoyISOUpdater/1.0"
+__version__ = "0.3.0"
+
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) VentoyISOUpdater/%s" % __version__
 CTX = ssl.create_default_context()
 
 # Manifest of installed versions, written next to the ISOs on the stick.
 MANIFEST_NAME = "ventoy_versions.json"
 
-# Windows ISO methods:
+# Windows ISO methods (--windows), none of them fully unattended:
+#   massgrave -- the default. Opens the massgrave.dev page, says which entry to
+#                pick, then watches for the download and files it onto the
+#                stick. Manual click, but nothing can block it.
 #   uup       -- UUP dump: pulls the build straight from Windows Update servers
-#                (no bot protection) and assembles the ISO locally with DISM
-#                (needs admin). The default: fully automated, always available.
-#   fido      -- Fido resolves an official, direct Microsoft download link. Light
-#                and no admin, but subject to Microsoft's anti-bot "Sentinel".
-#   massgrave -- browser hand-off (last resort, manual).
+#                (no bot protection) and assembles the ISO locally with DISM.
+#                Needs admin, ~40 minutes and ~15 GB of scratch space.
+#   fido      -- Fido resolves an official, direct Microsoft download link.
+#                Light and no admin, but subject to Microsoft's anti-bot
+#                "Sentinel", so it fails unpredictably.
 FIDO_URL = "https://raw.githubusercontent.com/pbatard/Fido/master/Fido.ps1"
 UUP_API = "https://api.uupdump.net"
 UUP_GET = "https://uupdump.net/get.php"
@@ -160,6 +170,78 @@ def remote_meta(url, timeout=30):
         return _read(req)
     except Exception:
         return None, None
+
+
+# Suffixes for a sums file that belongs to one image, appended to its URL.
+PER_FILE_SUMS = (".sha256", ".sha256sum", ".DIGESTS", ".sha256.txt")
+# Names of a sums file covering a whole directory, resolved next to the image.
+DIR_SUMS = ("SHA256SUMS", "sha256sum.txt", "sha256sums.txt", "CHECKSUM",
+            "SHA256SUM")
+
+_HASH = r"[0-9a-fA-F]{64}"
+
+
+def _sha256_from_text(text, filename):
+    """Pull the SHA-256 for `filename` out of a sums file's contents.
+
+    Understands the coreutils form ("<hash>  <file>", optionally "*<file>" for
+    binary mode) and the BSD form ("SHA256 (<file>) = <hash>").
+    """
+    quoted = re.escape(filename)
+    for pattern in (r"^(%s)[ \t]+[*]?%s[ \t]*$" % (_HASH, quoted),
+                    r"SHA256\s*\(\s*%s\s*\)\s*=\s*(%s)" % (quoted, _HASH)):
+        found = re.search(pattern, text, re.M)
+        if found:
+            return found.group(1).lower()
+    return None
+
+
+def remote_sha256(url, filename, timeout=20):
+    """Best-effort SHA-256 for an image, from whatever the source publishes.
+
+    Returns None when nothing is published -- SourceForge redirects and vendor
+    one-off URLs have no sums at all, and an unverified download still beats no
+    download.
+
+    A per-image sums file is addressed by the image URL itself, so a single
+    hash in it can be trusted even when the name inside differs -- NixOS writes
+    the upstream build name there while this script stores a shortened one. The
+    word boundary keeps a 128-character SHA-512 from being read as a SHA-256,
+    and requiring exactly one match keeps that shortcut off multi-entry files.
+    SourceForge answers these URLs with an HTML interstitial, which matches
+    nothing here and is therefore ignored on its own.
+    """
+    for suffix in PER_FILE_SUMS:
+        try:
+            text = http_get(url + suffix, timeout=timeout)
+        except Exception:
+            continue
+        direct = _sha256_from_text(text, filename)
+        if direct:
+            return direct
+        lone = re.findall(r"\b%s\b" % _HASH, text)
+        if len(lone) == 1:
+            return lone[0].lower()
+
+    base = url.rsplit("/", 1)[0] + "/"
+    for candidate in DIR_SUMS:
+        try:
+            text = http_get(base + candidate, timeout=timeout)
+        except Exception:
+            continue
+        found = _sha256_from_text(text, filename)
+        if found:
+            return found
+    return None
+
+
+def sha256_file(path, chunk=1024 * 1024):
+    """SHA-256 of a file, read in chunks so a 5 GB ISO stays out of memory."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(chunk), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _fmt_size(n):
@@ -251,9 +333,26 @@ def verkey(name):
     return tuple(int(n) for n in re.findall(r"\d+", name))
 
 
+_LISTING_CACHE = {}
+
+
+def http_get_cached(url, timeout=45):
+    """http_get, but each index is fetched only once per run.
+
+    Several catalog entries resolve off one and the same page: the four Proxmox
+    products share a directory, the three Fedora editions share the release
+    list. Without this they hit that host once per entry, and
+    enterprise.proxmox.com answers four simultaneous requests by timing out the
+    TLS handshake. Runs are short, so a value can never go stale within one.
+    """
+    if url not in _LISTING_CACHE:
+        _LISTING_CACHE[url] = http_get(url, timeout=timeout)
+    return _LISTING_CACHE[url]
+
+
 def latest_in_listing(base, file_regex):
     """Return (url, filename) of the highest-versioned file in an autoindex."""
-    html = http_get(base)
+    html = http_get_cached(base)
     files = re.findall(file_regex, html)
     if not files:
         raise RuntimeError("no file matching %r at %s" % (file_regex, base))
@@ -299,7 +398,8 @@ def _fedora_iso(edition, iso_regex):
     comes from an open mirror.
     """
     rel_base = "https://mirrors.kernel.org/fedora/releases/"
-    nums = [int(n) for n in re.findall(r'href="(\d+)/"', http_get(rel_base))]
+    nums = [int(n) for n in re.findall(r'href="(\d+)/"',
+                                       http_get_cached(rel_base))]
     if not nums:
         raise RuntimeError("could not list Fedora releases")
     iso_base = "%s%d/%s/x86_64/iso/" % (rel_base, max(nums), edition)
@@ -466,7 +566,8 @@ def r_dban():
 
 
 def r_hbcd():
-    # v1.0.8 is current; direct mirror link is best-effort.
+    # Fixed vendor URL: the filename never carries a version, so there is
+    # nothing to detect and the manifest can only diff on size / Last-Modified.
     return ("https://www.hirensbootcd.org/files/HBCD_PE_x64.iso",
             "HBCD_PE_x64.iso")
 
@@ -928,14 +1029,19 @@ def _progress(done, total, bps, final=False):
         sys.stdout.flush()
 
 
-def download(url, dest):
+def download(url, dest, sha256=None):
     """Download url -> dest safely, showing the serving host and live speed.
 
     Writes to `dest.part` and only atomically renames onto `dest` once the
     transfer is verified, so an existing good file is never clobbered by a
     truncated or wrong-content (e.g. HTML error page) download. Resumes an
     interrupted `.part` via an HTTP Range request; a 200 (range ignored)
-    restarts from scratch, a 416 means the .part is already complete."""
+    restarts from scratch, a 416 means the .part is already complete.
+
+    With `sha256` the finished .part is hashed before the rename, so a corrupted
+    or tampered image never reaches the final name -- size alone would not catch
+    it. A mismatch deletes the .part: resuming it would only rebuild the same
+    bad file."""
     part = dest + ".part"
     resume_from = os.path.getsize(part) if os.path.exists(part) else 0
     headers = {"User-Agent": _ua_for(url)}
@@ -992,6 +1098,15 @@ def download(url, dest):
     if total is not None and got != total:
         raise RuntimeError("incomplete download: got %s of %s"
                            % (_fmt_size(got), _fmt_size(total)))
+    if sha256:
+        sys.stdout.write("    verifying sha256 ...")
+        sys.stdout.flush()
+        actual = sha256_file(part)
+        if actual != sha256:
+            os.remove(part)
+            raise RuntimeError("sha256 mismatch (expected %s..., got %s...)"
+                               % (sha256[:12], actual[:12]))
+        sys.stdout.write(" ok\n")
     os.replace(part, dest)
 
 
@@ -1047,7 +1162,6 @@ def move_with_progress(src, dst, chunk=4 * 1024 * 1024):
 
 def download_memtest(dest_dir):
     """PassMark MemTest86 free: download the zip, extract the .img."""
-    import tempfile, zipfile
     tmp = tempfile.mkdtemp(prefix="memtest_")
     zpath = os.path.join(tmp, "memtest86-usb.zip")
     download("https://www.memtest86.com/downloads/memtest86-usb.zip", zpath)
@@ -1083,11 +1197,17 @@ def check_update(dest, entry, url, name):
     """Decide whether `name` needs (re)downloading.
 
     Returns (needs_update, reason, meta) where meta is (size, mtime) or None.
-    Handles three cases: a matching manifest record (fast rolling-release
-    check), a differently-named record (new version), and a file that is
-    physically present but unknown to the manifest -- which is adopted when its
-    size matches the remote so pre-existing ISOs on the stick are not
-    needlessly re-downloaded (nor destroyed on a size mismatch we can't read).
+    Handles three cases, and in two of them a file that is already correct is
+    adopted rather than fetched again:
+
+      * a manifest record under the same name -- the fast rolling-release check
+      * a record under a different name, yet the new name is already on disk:
+        a download that completed but was never recorded
+      * no record at all, e.g. an ISO put there by hand
+
+    In the last two the local size is compared against the remote one; a match
+    adopts the file, a mismatch redownloads, and an unreadable remote size
+    leaves the file alone rather than destroying it on a guess.
     """
     path = os.path.join(dest, name)
     if not os.path.exists(path):
@@ -1107,7 +1227,16 @@ def check_update(dest, entry, url, name):
         return False, "up to date", (size, mtime)
 
     if entry and entry.get("filename") != name:
-        return True, "new version %s -> %s" % (entry.get("filename"), name), None
+        # The file under the *new* name is already here -- a missing one
+        # returned above. So a previous run downloaded it and never got to
+        # record it: stick pulled, Ctrl+C, write error. Adopt it if it matches
+        # the remote size instead of pulling several GB down again.
+        size, mtime = remote_meta(url)
+        if size and local == int(size):
+            return False, "present, adopted (was %s)" % entry.get("filename"), \
+                (size, mtime)
+        return True, "new version %s -> %s" % (entry.get("filename"), name), \
+            (size, mtime)
 
     # Present on the stick but not in the manifest -> adopt or refresh by size.
     size, mtime = remote_meta(url)
@@ -1143,14 +1272,21 @@ def record_version(dest, manifest, label, url, name, meta):
 
 
 def fetch_tracked(dest, manifest, key, label, url, name, mirrors, args, summary):
-    """Update-check -> (optional mirror race) -> download -> record + prune.
-    Shared by the Linux ISO loop and the Windows/Fido path."""
+    """Update-check -> (mirror race) -> checksum -> download -> record + prune.
+    Shared by the Linux ISO loop and the Windows/Fido path. Under --dry-run it
+    stops after the check and reports what it would have done."""
     entry = manifest.get(key)
     if args.force:
         need, reason, meta = True, "forced", None
     else:
         need, reason, meta = check_update(dest, entry, url, name)
     print("==> %-24s %s  [%s]" % (label, name, reason))
+    if args.dry_run:
+        # Nothing is written in a dry run, manifest included -- the whole point
+        # is to see what a real run would change.
+        summary.append((name, "WOULD DOWNLOAD" if need else "SKIP (up to date)"))
+        print()
+        return
     if not need:
         # Persist the current on-disk state so later runs skip instantly, even
         # for files that were already on the stick (adopted, no prior record).
@@ -1172,7 +1308,12 @@ def fetch_tracked(dest, manifest, key, label, url, name, mirrors, args, summary)
     try:
         if mirrors and not args.no_mirror_test:
             url = fastest_mirror([url] + mirrors)
-        download(url, os.path.join(dest, name))
+        # Resolve the checksum only after the mirror is settled, so the sums
+        # file comes from the very host that serves the image.
+        expected = None if args.no_verify else remote_sha256(url, name)
+        if not expected and not args.no_verify:
+            print("    no published checksum -- size check only")
+        download(url, os.path.join(dest, name), expected)
         old = entry.get("filename") if entry else None
         if old and old != name:
             old_path = os.path.join(dest, old)
@@ -1327,7 +1468,9 @@ def cleanup_superseded(dest, manifest, current, mode, summary):
     print("\n  %d file(s), %s total" % (len(old), _fmt_size(total)))
 
     if mode == "no":
-        print("  (--cleanup no -- keeping them)")
+        # Also the dry-run path, which forces this mode -- so word it for both
+        # instead of naming a flag the user may not have passed.
+        print("  (keeping them -- pass --cleanup yes to delete)")
         return
     if mode == "ask":
         try:
@@ -1775,20 +1918,69 @@ def choose_selection(preset_arg=None, dest=None, manifest=None):
     return preset_items("standard")
 
 
-def choose_windows(already):
-    """Opt-in prompt for the Windows ISOs.
+# (key, headline, what it does, upside, downside). Menu order, so the
+# recommended method is first and a bare Enter selects it.
+WINDOWS_METHODS = [
+    ("massgrave", "massgrave  (recommended)",
+     "Opens the massgrave.dev page, tells you which entry to click, then "
+     "watches your Downloads folder and moves the ISO onto the stick.",
+     "always works, no admin rights, nothing upstream can block it",
+     "you click the download yourself, so the run is not unattended"),
+    ("uup", "uup",
+     "Pulls the build straight from Windows Update and assembles the ISO "
+     "locally with DISM.",
+     "official and unattended, no bot protection in the way",
+     "Windows only, needs admin, ~40 minutes and ~15 GB of free space"),
+    ("fido", "fido",
+     "Resolves an official, direct Microsoft download link and fetches it.",
+     "hands-off and light: no admin, no local build, no browser",
+     "Windows only, and Microsoft's anti-bot 'Sentinel' blocks it "
+     "unpredictably"),
+]
 
-    They are not in any preset because they cannot be fetched unattended:
-    massgrave.dev hands them out through the browser only. Picking them here
-    opens those pages later; the script then watches for the downloaded file
-    and renames it to the right name on the stick.
+
+def choose_windows_method():
+    """Ask how the Windows ISOs should be fetched. Returns a method key.
+
+    None of the three is simply better than the others, so the trade-off is
+    spelled out rather than decided silently. The default is the one that
+    cannot fail for reasons outside the user's control -- at the price of one
+    manual click.
+    """
+    print("\nHow should the Windows ISOs be fetched?\n")
+    for i, (key, headline, what, good, bad) in enumerate(WINDOWS_METHODS, 1):
+        unavailable = key in ("uup", "fido") and os.name != "nt"
+        print("  [%d] %s%s"
+              % (i, headline, "   (unavailable here: needs Windows)"
+                 if unavailable else ""))
+        for line in textwrap.wrap(what, 68):
+            print("      %s" % line)
+        for sign, text in (("+", good), ("-", bad)):
+            for n, line in enumerate(textwrap.wrap(text, 66)):
+                print("      %s  %s" % (sign if n == 0 else " ", line))
+        print()
+    try:
+        raw = input("Method [1]: ").strip()
+    except EOFError:
+        raw = ""
+    if raw.isdigit() and 1 <= int(raw) <= len(WINDOWS_METHODS):
+        return WINDOWS_METHODS[int(raw) - 1][0]
+    return WINDOWS_METHODS[0][0]
+
+
+def choose_windows(already, args):
+    """Opt-in prompt for the Windows ISOs, plus how to fetch them.
+
+    They are in no preset because none of the methods runs unattended -- see
+    WINDOWS_METHODS. An explicit --windows on the command line wins; the method
+    prompt only appears when the flag was left off.
     """
     wins = [it for it in CATALOG if it[4] == "windows"]
     if any(it[0] in already for it in wins):
         return []                       # already picked in the custom selector
 
-    print("\nWindows ISOs?  (not automatic -- massgrave.dev serves them via the")
-    print("browser; the script opens the pages and renames what you download)")
+    print("\nWindows ISOs?  (none of the ways to get them is fully unattended;")
+    print("you pick which one to use in the next step)")
     try:
         ans = input("Add Windows ISOs? [y/N]: ").strip().lower()
     except EOFError:
@@ -1804,7 +1996,11 @@ def choose_windows(already):
     except EOFError:
         raw = ""
     idx = parse_ranges(raw, len(wins)) if raw else [1, 2, 3]
-    return [wins[i - 1] for i in idx]
+    picked = [wins[i - 1] for i in idx]
+
+    if picked and args.windows is None:
+        args.windows = choose_windows_method()
+    return picked
 
 
 # --------------------------------------------------------------------------- #
@@ -1912,7 +2108,7 @@ def windows_needs_build(dest, manifest, args, win_items):
 
 def process_windows(dest, manifest, args, win_items, summary):
     """Download the selected Windows ISOs via the chosen method (--windows):
-    uup (default, official + local build), fido, or massgrave hand-off."""
+    massgrave hand-off (default), fido, or uup with a local build."""
     todo = []
     for key, label, _c, _t, _k, p in win_items:
         entry = manifest.get(key)
@@ -2315,8 +2511,16 @@ def main():
     ap.add_argument("--dest", default=None,
                     help="target folder / Ventoy drive "
                          "(if omitted, you get an interactive picker)")
+    ap.add_argument("--version", action="version",
+                    version="update_ventoy_isos.py %s" % __version__)
     ap.add_argument("--force", action="store_true",
                     help="re-download every ISO, ignoring the version manifest")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="only report what would be downloaded, deleted or "
+                         "left alone; writes nothing")
+    ap.add_argument("--no-verify", action="store_true",
+                    help="skip the SHA-256 check against the checksum file "
+                         "published next to the image")
     ap.add_argument("--no-mirror-test", action="store_true",
                     help="skip the fastest-mirror speed test; use the default "
                          "source directly")
@@ -2327,22 +2531,30 @@ def main():
                     help="what to do with superseded ISOs still on the stick: "
                          "ask (default, lists them and prompts), yes (delete "
                          "without asking) or no (only list them)")
+    # No default: staying None is what tells the interactive path that the
+    # user has not decided yet, so it can ask. Resolved below.
     ap.add_argument("--windows", choices=["massgrave", "uup", "fido"],
-                    default="massgrave",
-                    help="Windows ISO method: massgrave (default, browser "
-                         "hand-off + automatic rename), uup (official, builds "
-                         "the ISO locally, needs admin), or fido")
+                    default=None,
+                    help="Windows ISO method, skipping the prompt: massgrave "
+                         "(default, browser hand-off + automatic rename), uup "
+                         "(official, builds the ISO locally, needs admin), or "
+                         "fido (official direct link, often bot-blocked)")
     args = ap.parse_args()
 
     target = args.dest if args.dest else choose_dest()
     dest = os.path.abspath(target)
-    os.makedirs(dest, exist_ok=True)
+    if not args.dry_run:
+        os.makedirs(dest, exist_ok=True)
     manifest = load_manifest(dest)
 
     selection = choose_selection(args.preset, dest, manifest)
-    # Windows is never part of a preset -- ask for it separately.
+    # Windows is never part of a preset -- ask for it separately. That prompt
+    # also settles the method, unless --windows already did.
     if args.preset is None:
-        selection = selection + choose_windows({it[0] for it in selection})
+        selection = selection + choose_windows({it[0] for it in selection},
+                                               args)
+    if args.windows is None:
+        args.windows = WINDOWS_METHODS[0][0]
     iso_items = [it for it in selection if it[4] == "iso"]
     win_items = [it for it in selection if it[4] == "windows"]
     mem_items = [it for it in selection if it[4] == "memtest"]
@@ -2411,7 +2623,11 @@ def main():
             mt_need, mt_reason, mt_meta = check_update(
                 dest, mt_entry, mt_url, "memtest86-usb.img")
         print("==> %-24s memtest86-usb.img  [%s]" % ("MemTest86", mt_reason))
-        if not mt_need:
+        if args.dry_run:
+            summary.append(("memtest86-usb.img",
+                            "WOULD DOWNLOAD" if mt_need else "SKIP (up to date)"))
+            print()
+        elif not mt_need:
             summary.append(("memtest86-usb.img", "SKIP (up to date)"))
             print()
         else:
@@ -2427,17 +2643,23 @@ def main():
                 print("    FAILED: %s\n" % e)
                 summary.append(("memtest86-usb.img", "FAIL: %s" % e))
 
-    # ---- Windows ISOs (Fido primary, massgrave fallback) ---------------- #
-    if win_items:
+    # ---- Windows ISOs --------------------------------------------------- #
+    # Every Windows method either drives a browser or builds an image locally,
+    # so there is nothing a dry run could report without doing the work.
+    if win_items and args.dry_run:
+        print("==> %-24s %d item(s) skipped in --dry-run\n"
+              % ("Windows", len(win_items)))
+    elif win_items:
         process_windows(dest, manifest, args, win_items, summary)
 
     # ---- old versions left on the stick --------------------------------- #
     # Runs last so the manifest already holds this run's new filenames -- what
-    # is left over can only be the previous versions.
+    # is left over can only be the previous versions. A dry run downgrades the
+    # mode to "no", which still lists the leftovers but deletes nothing.
     extra = [("memtest", "MemTest86", "memtest86-usb.img")] if mem_items else []
     cleanup_superseded(dest, manifest,
                        current_files(manifest, resolved, extra),
-                       args.cleanup, summary)
+                       "no" if args.dry_run else args.cleanup, summary)
 
     # ---- summary -------------------------------------------------------- #
     if not summary:
