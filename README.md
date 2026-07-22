@@ -34,19 +34,6 @@ command when it sees one.
 
 ## What it does
 
-**Updates Ventoy itself first.** Before touching a single ISO, the script
-compares the newest Ventoy release against what it last installed and offers to
-update (default yes; `--no-ventoy` skips the check). The update is handed to
-Ventoy's own installer rather than reimplemented -- it rewrites a bootloader,
-and there is one correct way to do that.
-
-Ventoy keeps its version on the VTOYEFI partition, which needs raw device
-access to read, so the installed version is only known once this script has
-installed it; before that it says so. The offer appears only for the root of a
-removable drive that carries a `ventoy` directory, so `--dest C:\isos` can never
-put a bootloader rewrite one keystroke away. From WSL it is declined outright --
-no raw access to the USB device.
-
 **Only downloads what changed.** Every downloaded ISO is recorded in
 `ventoy_versions.json` next to the ISOs. On the next run the newest version
 online is compared against that record; rolling releases that keep the same
@@ -105,7 +92,6 @@ what each one costs; pass `--windows` to skip that prompt.
 | `--dry-run` | report what would change; write nothing |
 | `--force` | re-download everything, ignoring the manifest |
 | `--no-verify` | skip the SHA-256 check |
-| `--no-ventoy` | skip the Ventoy self-update check |
 | `--version` | print the version and exit |
 | `--preset standard\|advanced\|everything\|custom` | skip the menu |
 | `--cleanup ask\|yes\|no` | what to do with superseded ISOs (default `ask`) |
