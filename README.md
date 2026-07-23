@@ -81,7 +81,10 @@ fastest one is used -- disable with `--no-mirror-test`.
 
 **Windows ISOs** are in no preset, because none of the three ways to get them
 runs unattended. Pick them and the script asks which method to use, spelling out
-what each one costs; pass `--windows` to skip that prompt.
+what each one costs; pass `--windows` to skip that prompt. Windows 11, 10 and
+**Windows Server 2022 / 2025** are all offered here. Server is browser-only on
+massgrave, so those always take the `massgrave` hand-off even under `--windows
+fido`/`uup` (which don't cover Server).
 
 | Method | What it does | Upside | Downside |
 | --- | --- | --- | --- |
@@ -103,7 +106,9 @@ to guess and nothing to look up:
 template/
 ├── win10/          -> applied to every Windows 10 image on the stick
 │   └── unattend.xml
-└── win11/          -> applied to every Windows 11 image
+├── win11/          -> applied to every Windows 11 image
+│   └── autounattend.xml
+└── win2025/        -> Windows Server uses the same scheme (win2022 / win2025)
     └── autounattend.xml
 ```
 

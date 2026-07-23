@@ -849,6 +849,7 @@ def r_freebsd():
 # --------------------------------------------------------------------------- #
 WIN11_PAGE = "https://massgrave.dev/windows_11_links"
 WIN10_PAGE = "https://massgrave.dev/windows_10_links"
+WINSERVER_PAGE = "https://massgrave.dev/windows-server-links"
 
 CATALOG = [
     # ---- Desktop --------------------------------------------------------- #
@@ -941,6 +942,30 @@ CATALOG = [
         {"win": "10", "rel": "22H2", "lang": "German", "page": WIN10_PAGE,
          "pick": "Win 10 22H2 (final) -> German",
          "tmpl": "Win_10_22H2_German_%s.iso"}),
+    # ---- Windows Server ------------------------------------------------- #
+    # Same opt-in path as the desktop editions (massgrave browser download).
+    # "server": True marks them so process_windows keeps them on the massgrave
+    # hand-off even under --windows fido/uup, neither of which covers Server.
+    ("winsrv2025_en", "Windows Server 2025 English", "Windows Server",
+        "windows", "windows",
+        {"win": "2025", "rel": "2025", "lang": "English", "page": WINSERVER_PAGE,
+         "pick": "Windows Server 2025 -> English (en-us)", "server": True,
+         "tmpl": "Win_Server_2025_English_%s.iso"}),
+    ("winsrv2025_de", "Windows Server 2025 German",  "Windows Server",
+        "windows", "windows",
+        {"win": "2025", "rel": "2025", "lang": "German", "page": WINSERVER_PAGE,
+         "pick": "Windows Server 2025 -> German (de-de)", "server": True,
+         "tmpl": "Win_Server_2025_German_%s.iso"}),
+    ("winsrv2022_en", "Windows Server 2022 English", "Windows Server",
+        "windows", "windows",
+        {"win": "2022", "rel": "2022", "lang": "English", "page": WINSERVER_PAGE,
+         "pick": "Windows Server 2022 -> English (en-us)", "server": True,
+         "tmpl": "Win_Server_2022_English_%s.iso"}),
+    ("winsrv2022_de", "Windows Server 2022 German",  "Windows Server",
+        "windows", "windows",
+        {"win": "2022", "rel": "2022", "lang": "German", "page": WINSERVER_PAGE,
+         "pick": "Windows Server 2022 -> German (de-de)", "server": True,
+         "tmpl": "Win_Server_2022_German_%s.iso"}),
 ]
 
 # One-line "what is this and when do I boot it" for every catalog key.
@@ -1017,6 +1042,11 @@ DESCRIPTIONS = {
     "win11_en":      "official Win 11 25H2 installer, English",
     "win10_en":      "official Win 10 22H2 installer, English",
     "win10_de":      "official Win 10 22H2 installer, German",
+    # Windows Server (manual, via massgrave.dev)
+    "winsrv2025_en": "Windows Server 2025 -- current LTSC, English",
+    "winsrv2025_de": "Windows Server 2025 -- current LTSC, German",
+    "winsrv2022_en": "Windows Server 2022 -- previous LTSC, English",
+    "winsrv2022_de": "Windows Server 2022 -- previous LTSC, German",
 }
 
 # Windows is deliberately absent from every preset -- see choose_windows().
@@ -2030,14 +2060,18 @@ def choose_windows(already, args):
 # Windows (massgrave) build detection
 # --------------------------------------------------------------------------- #
 def detect_windows_builds():
-    win11, win10 = "26200.8655", "19045.6456"   # fallbacks
+    """Latest build number per edition, keyed by the catalog `win` value
+    ('11', '10', '2022', '2025'), read from the massgrave markdown. Any lookup
+    that fails keeps its fallback -- the build only shapes the target filename."""
+    builds = {"11": "26200.8655", "10": "19045.6456",
+              "2022": "20348.5256", "2025": "26100.32995"}   # fallbacks
     try:
         md = http_get("https://raw.githubusercontent.com/massgravel/"
                       "massgrave.dev/main/docs/windows_11_links.md")
         m = re.search(r"Consumer 25H2.{0,60}?Build - ([\d.]+)[^\n]*Latest",
                       md, re.S)
         if m:
-            win11 = m.group(1)
+            builds["11"] = m.group(1)
     except Exception:
         pass
     try:
@@ -2045,10 +2079,20 @@ def detect_windows_builds():
                       "massgrave.dev/main/docs/windows_10_links.md")
         m = re.search(r"Build - (19045\.\d+)", md)
         if m:
-            win10 = m.group(1)
+            builds["10"] = m.group(1)
     except Exception:
         pass
-    return win11, win10
+    try:
+        md = http_get("https://raw.githubusercontent.com/massgravel/"
+                      "massgrave.dev/main/docs/windows-server-links.md")
+        for year in ("2025", "2022"):
+            m = re.search(r"Windows Server %s.*?Build - ([\d.]+)" % year,
+                          md, re.S)
+            if m:
+                builds[year] = m.group(1)
+    except Exception:
+        pass
+    return builds
 
 
 # --------------------------------------------------------------------------- #
@@ -2148,10 +2192,19 @@ def process_windows(dest, manifest, args, win_items, summary):
 
     if args.windows == "massgrave":
         _massgrave_handoff(dest, manifest, todo, summary)
-    elif args.windows == "fido":
-        _process_fido(dest, manifest, args, todo, summary)
-    else:
-        _process_uup(dest, manifest, args, todo, summary)
+        return
+
+    # Fido and UUP dump only cover consumer editions -- Server ISOs are
+    # browser-only, so they stay on the massgrave hand-off regardless.
+    server = [t for t in todo if t[2].get("server")]
+    rest = [t for t in todo if not t[2].get("server")]
+    if rest:
+        if args.windows == "fido":
+            _process_fido(dest, manifest, args, rest, summary)
+        else:
+            _process_uup(dest, manifest, args, rest, summary)
+    if server:
+        _massgrave_handoff(dest, manifest, server, summary)
 
 
 # ---- UUP dump: official ISOs from Windows Update, built locally ---------- #
@@ -2384,7 +2437,8 @@ def _iso_files(folders):
 def _match_score(fname, win, lang):
     """How well a downloaded filename matches an expected Windows ISO."""
     n = fname.lower().replace("-", "_").replace(" ", "_")
-    if re.search(r"win(dows)?_?%s(?!\d)" % win, n):
+    # Consumer names read "win_11"/"windows_10"; Server names "windows_server_2025".
+    if re.search(r"(win(dows)?|server)_?%s(?!\d)" % win, n):
         score = 2
     else:
         return 0                       # wrong Windows version
@@ -2497,11 +2551,10 @@ def windows_watch_rename(dest, manifest, plan, summary, wait_min=90):
 
 def _massgrave_handoff(dest, manifest, items, summary, watch=True):
     """Open the massgrave pages, then watch for and rename what gets saved."""
-    win11_build, win10_build = detect_windows_builds()
-    builds = {"win11": win11_build, "win10": win10_build}
+    builds = detect_windows_builds()
     plan = []      # (key, label, target_name, win, lang, page, pick)
     for key, label, p in items:
-        build = builds["win11" if p["win"] == "11" else "win10"]
+        build = builds.get(p["win"], "unknown")
         plan.append((key, label, p["tmpl"] % build, p["win"], p["lang"],
                      p["page"], p["pick"]))
 
