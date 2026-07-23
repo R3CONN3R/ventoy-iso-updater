@@ -82,6 +82,7 @@ Usage:
 """
 
 import argparse
+import atexit
 import hashlib
 import io
 import json
@@ -100,7 +101,7 @@ import webbrowser
 import zipfile
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
-__version__ = "0.6.2"
+__version__ = "0.7.0"
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) VentoyISOUpdater/%s" % __version__
 CTX = ssl.create_default_context()
@@ -2792,6 +2793,15 @@ def sync_auto_install(dest, manifest, args):
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
+def _farewell():
+    """Easter egg: a Cowboy Bebop send-off, printed once as the program exits.
+    Italic only on a real terminal, so redirected/piped output stays clean."""
+    msg = "See you Space Cowboy!"
+    if sys.stdout.isatty():
+        msg = "\033[3m%s\033[0m" % msg      # ANSI italic
+    print("\n" + msg)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Update Ventoy ISOs to newest.")
     ap.add_argument("--dest", default=None,
@@ -2826,6 +2836,9 @@ def main():
                          "(official, builds the ISO locally, needs admin), or "
                          "fido (official direct link, often bot-blocked)")
     args = ap.parse_args()
+    # Registered here, after parse_args -- so --help/--version, which exit during
+    # parsing, stay clean, while every real run gets the send-off on the way out.
+    atexit.register(_farewell)
 
     target = args.dest if args.dest else choose_dest()
     # expanduser first: shells expand a bare ~ before we see it, but cmd.exe and
