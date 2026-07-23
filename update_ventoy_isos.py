@@ -100,7 +100,7 @@ import webbrowser
 import zipfile
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) VentoyISOUpdater/%s" % __version__
 CTX = ssl.create_default_context()
@@ -1832,8 +1832,11 @@ def choose_dest():
     print("  [.] default folder ./isos")
     print("  [q] quit\n")
 
+    # Default hint tracks what an empty answer actually does: the first drive
+    # when one exists, otherwise the ./isos folder -- there is no [1] to offer.
+    default = "1" if drives else "."
     try:
-        choice = input("Select target [1]: ").strip().lower()
+        choice = input("Select target [%s]: " % default).strip().lower()
     except EOFError:
         choice = ""
 
