@@ -2794,8 +2794,8 @@ def sync_auto_install(dest, manifest, args):
 # Main
 # --------------------------------------------------------------------------- #
 def _farewell():
-    """Easter egg: a Cowboy Bebop send-off, printed once as the program exits.
-    Italic only on a real terminal, so redirected/piped output stays clean."""
+    """Print the parting line once as the program exits. Italic only on a real
+    terminal, so redirected/piped output stays clean."""
     msg = "See you Space Cowboy!"
     if sys.stdout.isatty():
         msg = "\033[3m%s\033[0m" % msg      # ANSI italic
