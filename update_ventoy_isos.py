@@ -1805,6 +1805,12 @@ def detect_usb_drives():
     return drives
 
 
+def _quit():
+    """Leave cleanly from an interactive menu -- nothing has been written yet."""
+    print("Nothing written -- bye.")
+    sys.exit(0)
+
+
 def choose_dest():
     """Interactive target picker used when --dest is not supplied."""
     drives = detect_usb_drives()
@@ -1823,13 +1829,16 @@ def choose_dest():
         print("        sudo mkdir -p /mnt/%s && sudo mount -t drvfs %s: /mnt/%s"
               % (letter, letter.upper(), letter))
     print("  [o] other path (type it in)")
-    print("  [.] default folder ./isos\n")
+    print("  [.] default folder ./isos")
+    print("  [q] quit\n")
 
     try:
         choice = input("Select target [1]: ").strip().lower()
     except EOFError:
         choice = ""
 
+    if choice == "q":
+        _quit()
     if choice == "" and drives:
         return drives[0][0]
     if choice == "" or choice == ".":
@@ -1882,7 +1891,7 @@ def custom_select(preselect=None, dest=None, manifest=None):
 
     print("\nPick items individually. Enter numbers/ranges, e.g. 1,3,5-9.")
     print("Prefix with '-' to remove from the preset, '+' to add. "
-          "'a'=all, ''=keep preset.")
+          "'a'=all, ''=keep preset, 'q'=quit.")
     print("  [x] = selected    * = already on the stick "
           "(re-picking it only checks for updates)")
     last = None
@@ -1900,6 +1909,8 @@ def custom_select(preselect=None, dest=None, manifest=None):
     except EOFError:
         raw = ""
 
+    if raw == "q":
+        _quit()
     chosen = {it[0] for it in CATALOG if it[0] in preselect}
     if raw in ("a", "all"):
         return list(CATALOG)
@@ -1938,6 +1949,7 @@ def choose_selection(preset_arg=None, dest=None, manifest=None):
     print("  [3] Everything  (%2d items)  + niche and legacy items" % alln)
     print("  [4] Custom                 pick individually")
     print("  [5] Custom from Standard   start with Standard, then adjust")
+    print("  [q] quit")
     if installed:
         print("  [6] Update what's there (%2d items)  keep the current set, "
               "just refresh it" % len(installed))
@@ -1947,10 +1959,12 @@ def choose_selection(preset_arg=None, dest=None, manifest=None):
               "queueing ISOs you never wanted.")
     print()
     try:
-        choice = input("Select [1]: ").strip()
+        choice = input("Select [1]: ").strip().lower()
     except EOFError:
         choice = ""
 
+    if choice == "q":
+        _quit()
     if choice in ("", "1"):
         return preset_items("standard")
     if choice == "2":
