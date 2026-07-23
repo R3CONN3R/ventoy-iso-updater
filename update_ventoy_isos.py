@@ -100,7 +100,7 @@ import webbrowser
 import zipfile
 from urllib.parse import quote, urlencode, urljoin, urlparse
 
-__version__ = "0.6.1"
+__version__ = "0.6.2"
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) VentoyISOUpdater/%s" % __version__
 CTX = ssl.create_default_context()
@@ -2828,7 +2828,10 @@ def main():
     args = ap.parse_args()
 
     target = args.dest if args.dest else choose_dest()
-    dest = os.path.abspath(target)
+    # expanduser first: shells expand a bare ~ before we see it, but cmd.exe and
+    # a quoted "~/isos" don't -- without this that leading ~ becomes a folder
+    # literally named "~" under the current directory.
+    dest = os.path.abspath(os.path.expanduser(target))
     if not args.dry_run:
         os.makedirs(dest, exist_ok=True)
     manifest = load_manifest(dest)

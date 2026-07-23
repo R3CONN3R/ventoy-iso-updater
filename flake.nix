@@ -43,7 +43,7 @@
 
           ventoy-iso-updater = pkgs.stdenvNoCC.mkDerivation {
             pname = "ventoy-iso-updater";
-            version = "v0.6.1";
+            version = "v0.6.2";
 
             src = ./.;
 
