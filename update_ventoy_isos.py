@@ -1808,7 +1808,7 @@ def detect_usb_drives():
 
 def _quit():
     """Leave cleanly from an interactive menu -- nothing has been written yet."""
-    print("Nothing written -- bye.")
+    print("Nothing written.")
     sys.exit(0)
 
 
